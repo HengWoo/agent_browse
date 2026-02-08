@@ -43,6 +43,6 @@ If offline:
 Agent Browse Relay
   Server:    OFFLINE
 
-  To start: cd /Users/heng/Development/agent_browse && uv run python relay_server.py
+  To start: uv run python relay_server.py  (from the agent_browse project root)
   Then load extension from extension/ in Chrome
 ```

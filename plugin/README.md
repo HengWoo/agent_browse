@@ -17,7 +17,7 @@ Claude Code ──HTTP──► Relay Server (127.0.0.1:18800) ◄──WebSocke
 ### 1. Start the Relay Server
 
 ```bash
-cd /Users/heng/Development/agent_browse
+# From the agent_browse project root
 uv run python relay_server.py
 ```
 
@@ -31,7 +31,7 @@ uv run python relay_server.py
 ### 3. Install Plugin (symlink)
 
 ```bash
-ln -sf /Users/heng/Development/agent_browse/plugin ~/.claude/plugins/agent-browse
+ln -sf "$(pwd)/plugin" ~/.claude/plugins/agent-browse
 ```
 
 ## Usage

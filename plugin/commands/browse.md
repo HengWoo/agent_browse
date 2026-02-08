@@ -17,15 +17,15 @@ bash {plugin_dir}/scripts/relay_health.sh
 ```
 
 If the server is **offline**, tell the user:
-> The relay server is not running. Start it with:
+> The relay server is not running. Start it from the agent_browse project root:
 > ```
-> cd /Users/heng/Development/agent_browse && uv run python relay_server.py
+> uv run python relay_server.py
 > ```
 > Then load the Chrome extension from `extension/` and click its icon on your target tab.
 
 If the extension is **not connected**, tell the user:
 > The relay server is running but no Chrome extension is connected.
-> Load the extension from `/Users/heng/Development/agent_browse/extension/` in Chrome (chrome://extensions → Load unpacked).
+> Load the extension from the `extension/` directory in Chrome (chrome://extensions → Load unpacked).
 
 ### 2. List Available Tabs
 

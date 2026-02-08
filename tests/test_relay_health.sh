@@ -17,7 +17,7 @@ echo "=== relay_health.sh Tests ==="
 echo ""
 echo "--- JSON Output ---"
 output=$("$HEALTH" 2>/dev/null) || true
-if python3 -c "import json; json.loads('''$output''')" 2>/dev/null; then
+if echo "$output" | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null; then
     pass "Output is valid JSON"
 else
     fail "Output is not valid JSON: $output"

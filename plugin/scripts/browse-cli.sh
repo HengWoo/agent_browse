@@ -52,6 +52,17 @@ Examples:
 EOF
 }
 
+validate_int() {
+    if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+        echo "Error: '$1' is not a valid integer" >&2
+        exit 1
+    fi
+}
+
+json_escape() {
+    python3 -c "import json,sys; sys.stdout.write(json.dumps(sys.argv[1]))" "$1"
+}
+
 do_get() {
     local endpoint="$1"
     if [ "$DRY_RUN" = true ]; then
@@ -95,43 +106,55 @@ case "$command" in
         ;;
     attach)
         [ $# -lt 1 ] && { echo "Error: attach requires <tabId>" >&2; exit 1; }
+        validate_int "$1"
         do_post "/attach" "{\"tabId\": $1}"
         ;;
     detach)
         [ $# -lt 1 ] && { echo "Error: detach requires <tabId>" >&2; exit 1; }
+        validate_int "$1"
         do_post "/detach" "{\"tabId\": $1}"
         ;;
     navigate)
         [ $# -lt 2 ] && { echo "Error: navigate requires <tabId> <url>" >&2; exit 1; }
-        do_post "/navigate" "{\"tabId\": $1, \"url\": \"$2\"}"
+        validate_int "$1"
+        escaped_url=$(json_escape "$2")
+        do_post "/navigate" "{\"tabId\": $1, \"url\": ${escaped_url}}"
         ;;
     click)
         [ $# -lt 3 ] && { echo "Error: click requires <tabId> <x> <y>" >&2; exit 1; }
+        validate_int "$1"
+        validate_int "$2"
+        validate_int "$3"
         do_post "/click" "{\"tabId\": $1, \"x\": $2, \"y\": $3}"
         ;;
     type)
         [ $# -lt 2 ] && { echo "Error: type requires <tabId> <text>" >&2; exit 1; }
-        # Escape double quotes in text
-        text=$(echo "$2" | sed 's/"/\\"/g')
-        do_post "/type" "{\"tabId\": $1, \"text\": \"${text}\"}"
+        validate_int "$1"
+        escaped_text=$(json_escape "$2")
+        do_post "/type" "{\"tabId\": $1, \"text\": ${escaped_text}}"
         ;;
     screenshot)
         [ $# -lt 1 ] && { echo "Error: screenshot requires <tabId>" >&2; exit 1; }
+        validate_int "$1"
         do_post "/screenshot" "{\"tabId\": $1}"
         ;;
     evaluate)
         [ $# -lt 2 ] && { echo "Error: evaluate requires <tabId> <expression>" >&2; exit 1; }
-        expr=$(echo "$2" | sed 's/"/\\"/g')
-        do_post "/evaluate" "{\"tabId\": $1, \"expression\": \"${expr}\"}"
+        validate_int "$1"
+        escaped_expr=$(json_escape "$2")
+        do_post "/evaluate" "{\"tabId\": $1, \"expression\": ${escaped_expr}}"
         ;;
     pageinfo)
         [ $# -lt 1 ] && { echo "Error: pageinfo requires <tabId>" >&2; exit 1; }
+        validate_int "$1"
         do_post "/pageInfo" "{\"tabId\": $1}"
         ;;
     cdp)
         [ $# -lt 2 ] && { echo "Error: cdp requires <tabId> <method> [params_json]" >&2; exit 1; }
+        validate_int "$1"
+        escaped_method=$(json_escape "$2")
         params="${3:-{}}"
-        do_post "/cdp" "{\"tabId\": $1, \"method\": \"$2\", \"params\": ${params}}"
+        do_post "/cdp" "{\"tabId\": $1, \"method\": ${escaped_method}, \"params\": ${params}}"
         ;;
     *)
         echo "Error: Unknown command '$command'" >&2

@@ -14,15 +14,21 @@ if response=$(curl -s --connect-timeout 1 --max-time 2 "${BASE_URL}/" 2>/dev/nul
         echo "$response" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
-data['server_url'] = '${BASE_URL}'
+data['server_url'] = sys.argv[1]
 data['status'] = 'online'
 print(json.dumps(data, indent=2))
-"
+" "${BASE_URL}"
     else
         # Server responded but not valid JSON
-        echo "{\"server_url\": \"${BASE_URL}\", \"status\": \"online\", \"note\": \"unexpected response format\"}"
+        python3 -c "
+import json, sys
+print(json.dumps({'server_url': sys.argv[1], 'status': 'online', 'note': 'unexpected response format'}))
+" "${BASE_URL}"
     fi
 else
     # Server unreachable
-    echo "{\"server_url\": \"${BASE_URL}\", \"status\": \"offline\", \"message\": \"Relay server not running. Start with: uv run python relay_server.py\"}"
+    python3 -c "
+import json, sys
+print(json.dumps({'server_url': sys.argv[1], 'status': 'offline', 'message': 'Relay server not running. Start with: uv run python relay_server.py'}))
+" "${BASE_URL}"
 fi
