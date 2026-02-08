@@ -1,0 +1,17 @@
+{
+  "name": "agent-browse",
+  "version": "1.0.0",
+  "description": "Browser automation via real Chrome sessions with anti-bot bypass. Controls your logged-in browser through a relay server and Chrome extension.",
+  "author": {
+    "name": "User"
+  },
+  "license": "MIT",
+  "keywords": [
+    "browser",
+    "automation",
+    "chrome",
+    "anti-bot",
+    "cdp",
+    "relay"
+  ]
+}
