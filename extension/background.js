@@ -100,6 +100,14 @@ async function handleRelayCommand(message) {
         return await screenshot(tabId);
       case "getPageInfo":
         return await getPageInfo(tabId);
+      case "snapshot":
+        return await getSnapshot(tabId);
+      case "clickSelector":
+        return await clickBySelector(tabId, params.selector);
+      case "clickText":
+        return await clickByText(tabId, params.text, params.exact);
+      case "pressKey":
+        return await pressKey(tabId, params.key);
       case "cdp":
         return await executeCommand(tabId, params.method, params.params);
       default:
@@ -251,6 +259,265 @@ async function getPageInfo(tabId) {
   }
   return evalResult;
 }
+
+// ============== Enhanced Actions ==============
+
+async function getSnapshot(tabId) {
+  if (!state.attachedTabs.has(tabId)) {
+    return { error: "Tab not attached. Call attach first." };
+  }
+
+  try {
+    // Accessibility.getFullAXTree requires Page.enable (already done in attach)
+    const result = await chrome.debugger.sendCommand(
+      { tabId },
+      "Accessibility.getFullAXTree"
+    );
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+async function clickBySelector(tabId, selector) {
+  if (!state.attachedTabs.has(tabId)) {
+    return { error: "Tab not attached. Call attach first." };
+  }
+
+  try {
+    // Atomically: find element by selector, get its bounding box, click center
+    const findResult = await chrome.debugger.sendCommand(
+      { tabId },
+      "Runtime.evaluate",
+      {
+        expression: `
+          (function() {
+            const el = document.querySelector(${JSON.stringify(selector)});
+            if (!el) return JSON.stringify({ error: "Element not found: ${selector}" });
+            const rect = el.getBoundingClientRect();
+            if (rect.width === 0 && rect.height === 0) {
+              return JSON.stringify({ error: "Element has zero size" });
+            }
+            return JSON.stringify({
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2
+            });
+          })()
+        `,
+        returnByValue: true
+      }
+    );
+
+    const coords = JSON.parse(findResult.result.value);
+    if (coords.error) {
+      return { success: false, error: coords.error };
+    }
+
+    // Click at computed coordinates
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: coords.x, y: coords.y,
+      button: "left", clickCount: 1
+    });
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: coords.x, y: coords.y,
+      button: "left", clickCount: 1
+    });
+
+    return { success: true, x: coords.x, y: coords.y };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+async function clickByText(tabId, text, exact = false) {
+  if (!state.attachedTabs.has(tabId)) {
+    return { error: "Tab not attached. Call attach first." };
+  }
+
+  try {
+    // Find element by visible text content
+    const findResult = await chrome.debugger.sendCommand(
+      { tabId },
+      "Runtime.evaluate",
+      {
+        expression: `
+          (function() {
+            const text = ${JSON.stringify(text)};
+            const exact = ${JSON.stringify(exact)};
+
+            // Use TreeWalker to find text nodes efficiently
+            const walker = document.createTreeWalker(
+              document.body,
+              NodeFilter.SHOW_ELEMENT,
+              {
+                acceptNode: function(node) {
+                  const style = window.getComputedStyle(node);
+                  if (style.display === 'none' || style.visibility === 'hidden') {
+                    return NodeFilter.FILTER_REJECT;
+                  }
+                  return NodeFilter.FILTER_ACCEPT;
+                }
+              }
+            );
+
+            let match = null;
+            while (walker.nextNode()) {
+              const el = walker.currentNode;
+              const innerText = el.innerText?.trim();
+              if (!innerText) continue;
+
+              if (exact ? innerText === text : innerText.includes(text)) {
+                // Prefer the deepest (most specific) match
+                match = el;
+              }
+            }
+
+            if (!match) return JSON.stringify({ error: "Text not found: " + text });
+            const rect = match.getBoundingClientRect();
+            if (rect.width === 0 && rect.height === 0) {
+              return JSON.stringify({ error: "Matching element has zero size" });
+            }
+            return JSON.stringify({
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2,
+              matchedText: match.innerText.trim().slice(0, 100)
+            });
+          })()
+        `,
+        returnByValue: true
+      }
+    );
+
+    const coords = JSON.parse(findResult.result.value);
+    if (coords.error) {
+      return { success: false, error: coords.error };
+    }
+
+    // Click at computed coordinates
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: coords.x, y: coords.y,
+      button: "left", clickCount: 1
+    });
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: coords.x, y: coords.y,
+      button: "left", clickCount: 1
+    });
+
+    return { success: true, x: coords.x, y: coords.y, matchedText: coords.matchedText };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Parse a key combo string like "Control+Shift+A" into modifier flags and key info.
+ */
+function parseKeyCombo(keyCombo) {
+  const parts = keyCombo.split('+');
+  const modifiers = { ctrl: false, shift: false, alt: false, meta: false };
+  let key = '';
+
+  for (const part of parts) {
+    const lower = part.toLowerCase();
+    if (lower === 'control' || lower === 'ctrl') modifiers.ctrl = true;
+    else if (lower === 'shift') modifiers.shift = true;
+    else if (lower === 'alt') modifiers.alt = true;
+    else if (lower === 'meta' || lower === 'command' || lower === 'cmd') modifiers.meta = true;
+    else key = part;
+  }
+
+  // Build CDP modifier bitmask
+  let modifierFlags = 0;
+  if (modifiers.alt) modifierFlags |= 1;
+  if (modifiers.ctrl) modifierFlags |= 2;
+  if (modifiers.meta) modifierFlags |= 4;
+  if (modifiers.shift) modifierFlags |= 8;
+
+  return { key, modifiers: modifierFlags };
+}
+
+// Map special key names to CDP key codes
+const SPECIAL_KEYS = {
+  'Enter': { code: 'Enter', keyCode: 13, key: 'Enter' },
+  'Tab': { code: 'Tab', keyCode: 9, key: 'Tab' },
+  'Escape': { code: 'Escape', keyCode: 27, key: 'Escape' },
+  'Backspace': { code: 'Backspace', keyCode: 8, key: 'Backspace' },
+  'Delete': { code: 'Delete', keyCode: 46, key: 'Delete' },
+  'ArrowUp': { code: 'ArrowUp', keyCode: 38, key: 'ArrowUp' },
+  'ArrowDown': { code: 'ArrowDown', keyCode: 40, key: 'ArrowDown' },
+  'ArrowLeft': { code: 'ArrowLeft', keyCode: 37, key: 'ArrowLeft' },
+  'ArrowRight': { code: 'ArrowRight', keyCode: 39, key: 'ArrowRight' },
+  'Home': { code: 'Home', keyCode: 36, key: 'Home' },
+  'End': { code: 'End', keyCode: 35, key: 'End' },
+  'PageUp': { code: 'PageUp', keyCode: 33, key: 'PageUp' },
+  'PageDown': { code: 'PageDown', keyCode: 34, key: 'PageDown' },
+  'Space': { code: 'Space', keyCode: 32, key: ' ' },
+  'F1': { code: 'F1', keyCode: 112, key: 'F1' },
+  'F2': { code: 'F2', keyCode: 113, key: 'F2' },
+  'F3': { code: 'F3', keyCode: 114, key: 'F3' },
+  'F5': { code: 'F5', keyCode: 116, key: 'F5' },
+  'F12': { code: 'F12', keyCode: 123, key: 'F12' },
+};
+
+async function pressKey(tabId, keyCombo) {
+  if (!state.attachedTabs.has(tabId)) {
+    return { error: "Tab not attached. Call attach first." };
+  }
+
+  try {
+    const { key, modifiers } = parseKeyCombo(keyCombo);
+    const specialKey = SPECIAL_KEYS[key];
+
+    const keyDown = {
+      type: "keyDown",
+      modifiers,
+      key: specialKey?.key ?? key,
+      code: specialKey?.code ?? `Key${key.toUpperCase()}`,
+      windowsVirtualKeyCode: specialKey?.keyCode ?? key.toUpperCase().charCodeAt(0),
+    };
+
+    const keyUp = {
+      type: "keyUp",
+      modifiers,
+      key: keyDown.key,
+      code: keyDown.code,
+      windowsVirtualKeyCode: keyDown.windowsVirtualKeyCode,
+    };
+
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", keyDown);
+
+    // For single printable characters without modifiers, also send a char event
+    if (key.length === 1 && modifiers === 0 && !specialKey) {
+      await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+        type: "char",
+        text: key,
+        modifiers: 0
+      });
+    }
+
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", keyUp);
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============== CDP Event Forwarding ==============
+
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  // Forward CDP events to server for network capture, download monitoring, etc.
+  sendToRelay({
+    type: "cdpEvent",
+    tabId: source.tabId,
+    method,
+    params
+  });
+});
 
 // ============== Event Handlers ==============
 
