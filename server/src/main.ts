@@ -16,6 +16,8 @@ import * as inputTools from './tools/input.js';
 import * as screenshotTools from './tools/screenshot.js';
 import * as snapshotTools from './tools/snapshot.js';
 import * as scriptTools from './tools/script.js';
+import * as networkTools from './tools/network.js';
+import * as cookieTools from './tools/cookies.js';
 
 const PORT = parseInt(process.env.AGENT_BROWSE_PORT ?? '18800', 10);
 
@@ -45,6 +47,8 @@ export async function main(): Promise<void> {
     ...Object.values(screenshotTools),
     ...Object.values(snapshotTools),
     ...Object.values(scriptTools),
+    ...Object.values(networkTools),
+    ...Object.values(cookieTools),
   ];
 
   allTools.sort((a, b) => a.name.localeCompare(b.name));

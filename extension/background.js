@@ -19,6 +19,8 @@ const state = {
   attachedTabs: new Map(), // tabId -> { attached: boolean }
   wsConnection: null,
   wsConnected: false,
+  // Network capture: tabId -> { enabled, requests: Map<requestId, reqData> }
+  networkCapture: new Map(),
 };
 
 // ============== WebSocket Connection ==============
@@ -108,6 +110,10 @@ async function handleRelayCommand(message) {
         return await clickByText(tabId, params.text, params.exact);
       case "pressKey":
         return await pressKey(tabId, params.key);
+      case "networkRequests":
+        return getNetworkRequests(tabId, params.filter, params.allTypes);
+      case "networkRequestDetail":
+        return await getNetworkRequestDetail(tabId, params.requestId);
       case "cdp":
         return await executeCommand(tabId, params.method, params.params);
       default:
@@ -507,13 +513,127 @@ async function pressKey(tabId, keyCombo) {
   }
 }
 
+// ============== Network Capture ==============
+
+/**
+ * Collect network requests in-memory per tab.
+ * The CDP event listener stores request/response data when Network is enabled.
+ */
+function ensureNetworkCapture(tabId) {
+  if (!state.networkCapture.has(tabId)) {
+    state.networkCapture.set(tabId, { requests: new Map() });
+  }
+  return state.networkCapture.get(tabId);
+}
+
+function getNetworkRequests(tabId, filter, allTypes) {
+  const capture = state.networkCapture.get(tabId);
+  if (!capture) {
+    return { success: true, data: [] };
+  }
+
+  let requests = Array.from(capture.requests.values());
+
+  // Filter to XHR/Fetch by default
+  if (!allTypes) {
+    requests = requests.filter(r => r.type === 'XHR' || r.type === 'Fetch');
+  }
+
+  // URL filter
+  if (filter) {
+    requests = requests.filter(r => r.url.includes(filter));
+  }
+
+  const data = requests.map(r => ({
+    id: r.requestId,
+    url: r.url,
+    method: r.method,
+    status: r.status,
+    type: r.type,
+    size: r.responseSize ?? 0,
+  }));
+
+  return { success: true, data };
+}
+
+async function getNetworkRequestDetail(tabId, requestId) {
+  const capture = state.networkCapture.get(tabId);
+  if (!capture || !capture.requests.has(requestId)) {
+    return { success: false, error: `Request ${requestId} not found` };
+  }
+
+  const req = capture.requests.get(requestId);
+
+  // Fetch response body via CDP
+  let responseBody = null;
+  try {
+    const bodyResult = await chrome.debugger.sendCommand(
+      { tabId },
+      "Network.getResponseBody",
+      { requestId }
+    );
+    responseBody = bodyResult.body;
+  } catch {
+    // Response body may not be available (e.g., streaming, binary)
+  }
+
+  return {
+    success: true,
+    data: {
+      url: req.url,
+      method: req.method,
+      requestHeaders: req.requestHeaders ?? {},
+      requestBody: req.postData ?? null,
+      status: req.status,
+      responseHeaders: req.responseHeaders ?? {},
+      responseBody,
+    }
+  };
+}
+
 // ============== CDP Event Forwarding ==============
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
-  // Forward CDP events to server for network capture, download monitoring, etc.
+  const tabId = source.tabId;
+
+  // Capture network events in-memory
+  if (method === 'Network.requestWillBeSent') {
+    const capture = ensureNetworkCapture(tabId);
+    capture.requests.set(params.requestId, {
+      requestId: params.requestId,
+      url: params.request.url,
+      method: params.request.method,
+      type: params.type ?? 'Other',
+      postData: params.request.postData,
+      requestHeaders: params.request.headers,
+      status: null,
+      responseHeaders: null,
+      responseSize: null,
+    });
+    // Cap stored requests to avoid memory bloat
+    if (capture.requests.size > 500) {
+      const firstKey = capture.requests.keys().next().value;
+      capture.requests.delete(firstKey);
+    }
+  } else if (method === 'Network.responseReceived') {
+    const capture = state.networkCapture.get(tabId);
+    if (capture && capture.requests.has(params.requestId)) {
+      const req = capture.requests.get(params.requestId);
+      req.status = params.response.status;
+      req.responseHeaders = params.response.headers;
+      req.type = params.type ?? req.type;
+    }
+  } else if (method === 'Network.loadingFinished') {
+    const capture = state.networkCapture.get(tabId);
+    if (capture && capture.requests.has(params.requestId)) {
+      capture.requests.get(params.requestId).responseSize = params.encodedDataLength;
+    }
+  }
+
+  // Forward all CDP events to server
   sendToRelay({
     type: "cdpEvent",
-    tabId: source.tabId,
+    tabId,
     method,
     params
   });
