@@ -88,6 +88,50 @@ describe('ExtensionBridge', () => {
     await expect(bridge.send('listTabs', {}, 200)).rejects.toThrow('timed out');
   });
 
+  it('rejects promise and cleans up when ws.send() throws', async () => {
+    const ws = await connectClient();
+
+    // Simulate extension responding normally first to prove connectivity
+    ws.on('message', () => {
+      // Close connection immediately after receiving the message
+      // so the next send in the bridge will fail
+      ws.close();
+    });
+
+    // First send triggers the close. After close, the pending request
+    // should be rejected (either by the send try-catch or by the disconnect handler).
+    await expect(bridge.send('listTabs', {}, 2000)).rejects.toThrow();
+
+    // Bridge should be usable after the failure — no stuck state
+    expect(bridge.isConnected).toBe(false);
+  });
+
+  it('isolates CDP event handler errors — one bad handler does not break others', async () => {
+    const ws = await connectClient();
+    const events: string[] = [];
+
+    // Register a handler that throws
+    bridge.onCdpEvent(() => {
+      throw new Error('handler 1 exploded');
+    });
+
+    // Register a handler that should still execute
+    bridge.onCdpEvent((method) => {
+      events.push(method);
+    });
+
+    ws.send(JSON.stringify({
+      type: 'cdpEvent',
+      method: 'Network.responseReceived',
+      params: { requestId: '456' },
+    }));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Second handler should have received the event despite the first throwing
+    expect(events).toEqual(['Network.responseReceived']);
+  });
+
   it('handles CDP event forwarding', async () => {
     const ws = await connectClient();
     const events: Array<{ method: string; params: unknown }> = [];

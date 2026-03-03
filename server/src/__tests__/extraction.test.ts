@@ -75,6 +75,22 @@ describe('extract_table tool', () => {
     expect(text).toContain('Alice');
     expect(text).toContain('Bob');
   });
+
+  it('throws descriptive error on malformed JSON response', async () => {
+    const ctx = mockBridge(() => ({
+      id: '1',
+      success: true,
+      data: {
+        result: {
+          value: 'not valid json {{{',
+        },
+      },
+    }));
+    const response = new McpResponse();
+    await expect(
+      extractTable.handler({ params: { tabId: 1 } }, response, ctx),
+    ).rejects.toThrow('Failed to parse table data');
+  });
 });
 
 describe('extract_links tool', () => {
@@ -102,5 +118,21 @@ describe('extract_links tool', () => {
     expect(text).toContain('2 links');
     expect(text).toContain('[Home]');
     expect(text).toContain('example.com/about');
+  });
+
+  it('throws descriptive error on malformed JSON response', async () => {
+    const ctx = mockBridge(() => ({
+      id: '1',
+      success: true,
+      data: {
+        result: {
+          value: '<html>not json</html>',
+        },
+      },
+    }));
+    const response = new McpResponse();
+    await expect(
+      extractLinks.handler({ params: { tabId: 1 } }, response, ctx),
+    ).rejects.toThrow('Failed to parse links data');
   });
 });

@@ -89,8 +89,10 @@ export const storageGet = defineTool({
     if (!result.success) {
       throw new Error(result.error ?? 'Failed to read localStorage');
     }
-    const data = result.data;
-    const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+    // Unwrap the CDP Runtime.evaluate response: { result: { value: "..." } }
+    const data = result.data as { result?: { value?: string } } | string | undefined;
+    const rawValue = typeof data === 'string' ? data : (data as { result?: { value?: string } })?.result?.value;
+    const text = rawValue ?? JSON.stringify(result.data, null, 2);
     response.appendText(text);
   },
 });

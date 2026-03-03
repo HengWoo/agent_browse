@@ -78,6 +78,7 @@ export const networkRequestDetail = defineTool({
       status: number;
       responseHeaders: Record<string, string>;
       responseBody?: string;
+      responseBodyError?: string;
     };
 
     const lines: string[] = [];
@@ -117,6 +118,9 @@ export const networkRequestDetail = defineTool({
       } else {
         lines.push(detail.responseBody);
       }
+    } else if (detail.responseBodyError) {
+      lines.push('### Response Body');
+      lines.push(`Could not retrieve response body: ${detail.responseBodyError}`);
     }
 
     response.appendText(lines.join('\n'));

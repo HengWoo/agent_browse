@@ -198,4 +198,33 @@ describe('snapshot tool', () => {
     expect(text).toContain('Email');
     expect(text).toContain('test@test.com');
   });
+
+  it('resets UIDs across consecutive calls', async () => {
+    const ctx = mockBridge(() => ({
+      id: '1',
+      success: true,
+      data: {
+        nodes: [
+          { nodeId: '1', role: { value: 'WebArea' }, name: { value: 'Page' }, childIds: ['2'] },
+          { nodeId: '2', role: { value: 'button' }, name: { value: 'OK' } },
+        ],
+      },
+    }));
+
+    // First call
+    const r1 = new McpResponse();
+    await snapshot.handler({ params: { tabId: 1 } }, r1, ctx);
+    const text1 = (r1.build('snapshot')[0] as { text: string }).text;
+
+    // Second call — UIDs should reset, not continue from previous
+    const r2 = new McpResponse();
+    await snapshot.handler({ params: { tabId: 1 } }, r2, ctx);
+    const text2 = (r2.build('snapshot')[0] as { text: string }).text;
+
+    // Both should contain e1 (the WebArea node)
+    expect(text1).toContain('[e1]');
+    expect(text2).toContain('[e1]');
+    // Both should be identical since input is identical
+    expect(text1).toEqual(text2);
+  });
 });

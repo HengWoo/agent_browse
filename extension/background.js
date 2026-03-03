@@ -278,8 +278,9 @@ async function getPageInfo(tabId) {
   if (evalResult.success && evalResult.data?.result?.value) {
     try {
       return { success: true, data: JSON.parse(evalResult.data.result.value) };
-    } catch {
-      return evalResult;
+    } catch (err) {
+      console.warn("[Relay] getPageInfo JSON.parse failed:", err.message);
+      return { success: false, error: `Failed to parse page info: ${err.message}` };
     }
   }
   return evalResult;
@@ -667,48 +668,52 @@ async function getNetworkRequestDetail(tabId, requestId) {
 // ============== CDP Event Forwarding ==============
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
-  const tabId = source.tabId;
+  try {
+    const tabId = source.tabId;
 
-  // Capture network events in-memory
-  if (method === 'Network.requestWillBeSent') {
-    const capture = ensureNetworkCapture(tabId);
-    capture.requests.set(params.requestId, {
-      requestId: params.requestId,
-      url: params.request.url,
-      method: params.request.method,
-      type: params.type ?? 'Other',
-      postData: params.request.postData,
-      requestHeaders: params.request.headers,
-      status: null,
-      responseHeaders: null,
-      responseSize: null,
+    // Capture network events in-memory
+    if (method === 'Network.requestWillBeSent') {
+      const capture = ensureNetworkCapture(tabId);
+      capture.requests.set(params.requestId, {
+        requestId: params.requestId,
+        url: params.request.url,
+        method: params.request.method,
+        type: params.type ?? 'Other',
+        postData: params.request.postData,
+        requestHeaders: params.request.headers,
+        status: null,
+        responseHeaders: null,
+        responseSize: null,
+      });
+      if (capture.requests.size > 500) {
+        const firstKey = capture.requests.keys().next().value;
+        capture.requests.delete(firstKey);
+      }
+    } else if (method === 'Network.responseReceived') {
+      const capture = state.networkCapture.get(tabId);
+      if (capture && capture.requests.has(params.requestId)) {
+        const req = capture.requests.get(params.requestId);
+        req.status = params.response.status;
+        req.responseHeaders = params.response.headers;
+        req.type = params.type ?? req.type;
+      }
+    } else if (method === 'Network.loadingFinished') {
+      const capture = state.networkCapture.get(tabId);
+      if (capture && capture.requests.has(params.requestId)) {
+        capture.requests.get(params.requestId).responseSize = params.encodedDataLength;
+      }
+    }
+
+    // Forward all CDP events to server
+    sendToRelay({
+      type: "cdpEvent",
+      tabId,
+      method,
+      params
     });
-    if (capture.requests.size > 500) {
-      const firstKey = capture.requests.keys().next().value;
-      capture.requests.delete(firstKey);
-    }
-  } else if (method === 'Network.responseReceived') {
-    const capture = state.networkCapture.get(tabId);
-    if (capture && capture.requests.has(params.requestId)) {
-      const req = capture.requests.get(params.requestId);
-      req.status = params.response.status;
-      req.responseHeaders = params.response.headers;
-      req.type = params.type ?? req.type;
-    }
-  } else if (method === 'Network.loadingFinished') {
-    const capture = state.networkCapture.get(tabId);
-    if (capture && capture.requests.has(params.requestId)) {
-      capture.requests.get(params.requestId).responseSize = params.encodedDataLength;
-    }
+  } catch (err) {
+    console.error("[Relay] CDP event handler error:", method, err);
   }
-
-  // Forward all CDP events to server
-  sendToRelay({
-    type: "cdpEvent",
-    tabId,
-    method,
-    params
-  });
 });
 
 // ============== Event Handlers ==============
@@ -734,18 +739,25 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
-    const { action, tabId } = message;
+    try {
+      const { action, tabId } = message;
 
-    if (action === "status") {
-      sendResponse({
-        attached: state.attachedTabs.has(tabId),
-        wsConnected: state.wsConnected,
-        attachedTabs: Array.from(state.attachedTabs.keys())
-      });
-    } else if (action === "attach") {
-      sendResponse(await attachToTab(tabId));
-    } else if (action === "detach") {
-      sendResponse(await detachFromTab(tabId));
+      if (action === "status") {
+        sendResponse({
+          attached: state.attachedTabs.has(tabId),
+          wsConnected: state.wsConnected,
+          attachedTabs: Array.from(state.attachedTabs.keys())
+        });
+      } else if (action === "attach") {
+        sendResponse(await attachToTab(tabId));
+      } else if (action === "detach") {
+        sendResponse(await detachFromTab(tabId));
+      } else {
+        sendResponse({ success: false, error: `Unknown popup action: ${action}` });
+      }
+    } catch (err) {
+      console.error("[Relay] Popup message handler error:", err);
+      sendResponse({ success: false, error: err.message });
     }
   })();
   return true;
