@@ -13,5 +13,9 @@ wheels/
 screenshot*.png
 *.png
 
+# Node.js
+node_modules/
+server/dist/
+
 # Browser profiles
 browser_profiles/
