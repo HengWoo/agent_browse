@@ -114,6 +114,10 @@ async function handleRelayCommand(message) {
         return getNetworkRequests(tabId, params.filter, params.allTypes);
       case "networkRequestDetail":
         return await getNetworkRequestDetail(tabId, params.requestId);
+      case "waitFor":
+        return await waitForCondition(tabId, params);
+      case "waitForDownload":
+        return await waitForDownloadComplete(tabId, params.timeout);
       case "cdp":
         return await executeCommand(tabId, params.method, params.params);
       default:
@@ -511,6 +515,105 @@ async function pressKey(tabId, keyCombo) {
   } catch (error) {
     return { success: false, error: error.message };
   }
+}
+
+// ============== Wait Conditions ==============
+
+async function waitForCondition(tabId, { selector, text, networkIdle, timeout = 30000 }) {
+  if (!state.attachedTabs.has(tabId)) {
+    return { error: "Tab not attached. Call attach first." };
+  }
+
+  const startTime = Date.now();
+  const pollInterval = 250;
+
+  while (Date.now() - startTime < timeout) {
+    try {
+      if (selector) {
+        const result = await chrome.debugger.sendCommand(
+          { tabId },
+          "Runtime.evaluate",
+          {
+            expression: `!!document.querySelector(${JSON.stringify(selector)})`,
+            returnByValue: true
+          }
+        );
+        if (result.result?.value === true) {
+          return { success: true, condition: 'selector', elapsed: Date.now() - startTime };
+        }
+      }
+
+      if (text) {
+        const result = await chrome.debugger.sendCommand(
+          { tabId },
+          "Runtime.evaluate",
+          {
+            expression: `document.body?.innerText?.includes(${JSON.stringify(text)}) ?? false`,
+            returnByValue: true
+          }
+        );
+        if (result.result?.value === true) {
+          return { success: true, condition: 'text', elapsed: Date.now() - startTime };
+        }
+      }
+
+      if (networkIdle) {
+        // Check if no network requests are pending
+        const capture = state.networkCapture.get(tabId);
+        if (capture) {
+          const pending = Array.from(capture.requests.values()).filter(r => r.status === null);
+          if (pending.length === 0) {
+            // Wait an additional 2s to confirm idle
+            await new Promise(r => setTimeout(r, 2000));
+            const stillPending = Array.from(capture.requests.values()).filter(r => r.status === null);
+            if (stillPending.length === 0) {
+              return { success: true, condition: 'networkIdle', elapsed: Date.now() - startTime };
+            }
+          }
+        } else {
+          // No network capture = no pending requests
+          return { success: true, condition: 'networkIdle', elapsed: Date.now() - startTime };
+        }
+      }
+    } catch (error) {
+      // Tab might be navigating, retry
+    }
+
+    await new Promise(r => setTimeout(r, pollInterval));
+  }
+
+  return { success: false, error: `Timeout after ${timeout}ms` };
+}
+
+async function waitForDownloadComplete(tabId, timeout = 60000) {
+  // Listen for Browser.downloadProgress events via CDP
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      resolve({ success: false, error: `Download timeout after ${timeout}ms` });
+    }, timeout);
+
+    // Store a one-time listener for this download
+    const downloadKey = `download_${tabId}_${Date.now()}`;
+    state[downloadKey] = { resolve, timer };
+
+    // The CDP event listener will pick up Browser.downloadProgress
+    // and resolve this promise when state is 'completed'
+    const checkInterval = setInterval(() => {
+      if (state[downloadKey]?.completed) {
+        clearInterval(checkInterval);
+        clearTimeout(timer);
+        const data = state[downloadKey].data;
+        delete state[downloadKey];
+        resolve({ success: true, data });
+      }
+    }, 500);
+
+    // Cleanup on timeout
+    setTimeout(() => {
+      clearInterval(checkInterval);
+      delete state[downloadKey];
+    }, timeout + 1000);
+  });
 }
 
 // ============== Network Capture ==============
