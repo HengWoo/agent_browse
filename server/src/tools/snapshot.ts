@@ -21,11 +21,10 @@ interface FormattedNode {
   depth: number;
 }
 
-let uidCounter = 0;
-
 /**
  * Assigns short sequential UIDs to a11y nodes for easy reference.
  * Returns a flat array of formatted nodes.
+ * UIDs are reset per call — each snapshot starts from e1.
  */
 function formatAXTree(nodes: AXNode[], maxNodes: number = 5000): FormattedNode[] {
   if (!nodes || nodes.length === 0) return [];
@@ -43,6 +42,8 @@ function formatAXTree(nodes: AXNode[], maxNodes: number = 5000): FormattedNode[]
   const result: FormattedNode[] = [];
   const rootId = nodes[0]?.nodeId;
   if (!rootId) return result;
+
+  let uidCounter = 0;
 
   // DFS traversal with depth tracking
   const stack: Array<{ id: string; depth: number }> = [{ id: rootId, depth: 0 }];

@@ -1,3 +1,6 @@
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { z } from 'zod';
 import { defineTool } from '../ToolDefinition.js';
 
@@ -21,11 +24,8 @@ export const screenshot = defineTool({
     const MAX_INLINE = 2 * 1024 * 1024; // 2MB
 
     if (sizeBytes > MAX_INLINE) {
-      const fs = await import('node:fs/promises');
-      const path = await import('node:path');
-      const os = await import('node:os');
-      const tmpFile = path.join(os.tmpdir(), `agent-browse-screenshot-${Date.now()}.png`);
-      await fs.writeFile(tmpFile, Buffer.from(base64, 'base64'));
+      const tmpFile = join(tmpdir(), `agent-browse-screenshot-${Date.now()}.png`);
+      await writeFile(tmpFile, Buffer.from(base64, 'base64'));
       response.appendText(`Screenshot saved to ${tmpFile} (${(sizeBytes / 1024 / 1024).toFixed(1)}MB — too large for inline).`);
     } else {
       response.attachImage(base64, 'image/png');

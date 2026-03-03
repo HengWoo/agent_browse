@@ -7,6 +7,9 @@
  * 3. Relay forwards commands to extension via WebSocket
  * 4. Extension executes via chrome.debugger API
  * 5. Results flow back through the same path
+ *
+ * Protocol contract: every response MUST include { success: boolean }.
+ * Payload goes in { data } — never in ad-hoc top-level properties.
  */
 
 // ============== Configuration ==============
@@ -19,9 +22,33 @@ const state = {
   attachedTabs: new Map(), // tabId -> { attached: boolean }
   wsConnection: null,
   wsConnected: false,
-  // Network capture: tabId -> { enabled, requests: Map<requestId, reqData> }
+  // Network capture: tabId -> { requests: Map<requestId, reqData> }
   networkCapture: new Map(),
 };
+
+// ============== Helpers ==============
+
+/**
+ * Guard: throw if tab not attached. Since handleRelayCommand wraps
+ * everything in try-catch, throwing is safe and avoids duplicated guards.
+ */
+function requireAttached(tabId) {
+  if (!state.attachedTabs.has(tabId)) {
+    throw new Error("Tab not attached. Call attach first.");
+  }
+}
+
+/**
+ * Atomic click at coordinates — used by click, clickBySelector, clickByText.
+ */
+async function dispatchClick(tabId, x, y) {
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+    type: "mousePressed", x, y, button: "left", clickCount: 1
+  });
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+    type: "mouseReleased", x, y, button: "left", clickCount: 1
+  });
+}
 
 // ============== WebSocket Connection ==============
 
@@ -38,7 +65,6 @@ function connectToRelay() {
     state.wsConnection.onopen = () => {
       console.log("[Relay] Connected to relay server");
       state.wsConnected = true;
-      // Send initial status
       sendToRelay({
         type: "status",
         attachedTabs: Array.from(state.attachedTabs.keys())
@@ -46,19 +72,24 @@ function connectToRelay() {
     };
 
     state.wsConnection.onmessage = async (event) => {
+      let messageId;
       try {
         const message = JSON.parse(event.data);
+        messageId = message.id;
         const result = await handleRelayCommand(message);
-        sendToRelay({ id: message.id, ...result });
+        sendToRelay({ id: messageId, ...result });
       } catch (error) {
         console.error("[Relay] Error handling message:", error);
+        // Always send error response back so the server doesn't hang
+        if (messageId) {
+          sendToRelay({ id: messageId, success: false, error: error.message });
+        }
       }
     };
 
     state.wsConnection.onclose = () => {
       console.log("[Relay] Disconnected from relay server");
       state.wsConnected = false;
-      // Attempt reconnection
       setTimeout(connectToRelay, RECONNECT_INTERVAL);
     };
 
@@ -74,6 +105,8 @@ function connectToRelay() {
 function sendToRelay(data) {
   if (state.wsConnection?.readyState === WebSocket.OPEN) {
     state.wsConnection.send(JSON.stringify(data));
+  } else {
+    console.warn("[Relay] Cannot send, WebSocket not open. Dropped:", data.id ?? data.type);
   }
 }
 
@@ -116,15 +149,13 @@ async function handleRelayCommand(message) {
         return await getNetworkRequestDetail(tabId, params.requestId);
       case "waitFor":
         return await waitForCondition(tabId, params);
-      case "waitForDownload":
-        return await waitForDownloadComplete(tabId, params.timeout);
       case "cdp":
         return await executeCommand(tabId, params.method, params.params);
       default:
-        return { error: `Unknown action: ${action}` };
+        return { success: false, error: `Unknown action: ${action}` };
     }
   } catch (error) {
-    return { error: error.message };
+    return { success: false, error: error.message };
   }
 }
 
@@ -134,7 +165,7 @@ async function listTabs() {
   const tabs = await chrome.tabs.query({});
   return {
     success: true,
-    tabs: tabs.map(t => ({
+    data: tabs.map(t => ({
       id: t.id,
       url: t.url,
       title: t.title,
@@ -153,12 +184,11 @@ async function attachToTab(tabId) {
     // Enable necessary CDP domains
     await chrome.debugger.sendCommand(debuggeeId, "Page.enable");
     await chrome.debugger.sendCommand(debuggeeId, "DOM.enable");
-    // Note: Input domain doesn't need enabling - dispatch events work directly
 
     console.log(`[Relay] Attached to tab ${tabId}`);
     updateBadge(tabId, "ON");
 
-    return { success: true, tabId };
+    return { success: true, data: { tabId } };
   } catch (error) {
     console.error(`[Relay] Attach failed:`, error);
     updateBadge(tabId, "!");
@@ -193,13 +223,11 @@ function updateBadge(tabId, text) {
 // ============== CDP Commands ==============
 
 async function executeCommand(tabId, method, params = {}) {
-  if (!state.attachedTabs.has(tabId)) {
-    return { error: "Tab not attached. Call attach first." };
-  }
+  requireAttached(tabId);
 
   try {
     const result = await chrome.debugger.sendCommand({ tabId }, method, params);
-    return { success: true, result };
+    return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -210,12 +238,11 @@ async function navigate(tabId, url) {
 }
 
 async function evaluate(tabId, expression) {
-  const result = await executeCommand(tabId, "Runtime.evaluate", {
+  return executeCommand(tabId, "Runtime.evaluate", {
     expression,
     returnByValue: true,
     awaitPromise: true
   });
-  return result;
 }
 
 async function screenshot(tabId) {
@@ -223,27 +250,15 @@ async function screenshot(tabId) {
 }
 
 async function click(tabId, x, y) {
-  // Dispatch mouse events
-  await executeCommand(tabId, "Input.dispatchMouseEvent", {
-    type: "mousePressed",
-    x, y,
-    button: "left",
-    clickCount: 1
-  });
-
-  await executeCommand(tabId, "Input.dispatchMouseEvent", {
-    type: "mouseReleased",
-    x, y,
-    button: "left",
-    clickCount: 1
-  });
-
+  requireAttached(tabId);
+  await dispatchClick(tabId, x, y);
   return { success: true };
 }
 
 async function typeText(tabId, text) {
+  requireAttached(tabId);
   for (const char of text) {
-    await executeCommand(tabId, "Input.dispatchKeyEvent", {
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
       type: "char",
       text: char
     });
@@ -260,9 +275,9 @@ async function getPageInfo(tabId) {
     })
   `);
 
-  if (evalResult.success && evalResult.result?.result?.value) {
+  if (evalResult.success && evalResult.data?.result?.value) {
     try {
-      return { success: true, ...JSON.parse(evalResult.result.result.value) };
+      return { success: true, data: JSON.parse(evalResult.data.result.value) };
     } catch {
       return evalResult;
     }
@@ -273,12 +288,9 @@ async function getPageInfo(tabId) {
 // ============== Enhanced Actions ==============
 
 async function getSnapshot(tabId) {
-  if (!state.attachedTabs.has(tabId)) {
-    return { error: "Tab not attached. Call attach first." };
-  }
+  requireAttached(tabId);
 
   try {
-    // Accessibility.getFullAXTree requires Page.enable (already done in attach)
     const result = await chrome.debugger.sendCommand(
       { tabId },
       "Accessibility.getFullAXTree"
@@ -290,20 +302,18 @@ async function getSnapshot(tabId) {
 }
 
 async function clickBySelector(tabId, selector) {
-  if (!state.attachedTabs.has(tabId)) {
-    return { error: "Tab not attached. Call attach first." };
-  }
+  requireAttached(tabId);
 
   try {
-    // Atomically: find element by selector, get its bounding box, click center
+    const selectorJson = JSON.stringify(selector);
     const findResult = await chrome.debugger.sendCommand(
       { tabId },
       "Runtime.evaluate",
       {
         expression: `
           (function() {
-            const el = document.querySelector(${JSON.stringify(selector)});
-            if (!el) return JSON.stringify({ error: "Element not found: ${selector}" });
+            const el = document.querySelector(${selectorJson});
+            if (!el) return JSON.stringify({ error: "Element not found: " + ${selectorJson} });
             const rect = el.getBoundingClientRect();
             if (rect.width === 0 && rect.height === 0) {
               return JSON.stringify({ error: "Element has zero size" });
@@ -318,36 +328,29 @@ async function clickBySelector(tabId, selector) {
       }
     );
 
+    if (!findResult?.result?.value) {
+      return {
+        success: false,
+        error: findResult?.exceptionDetails?.text ?? `Failed to evaluate selector: ${selector}`
+      };
+    }
+
     const coords = JSON.parse(findResult.result.value);
     if (coords.error) {
       return { success: false, error: coords.error };
     }
 
-    // Click at computed coordinates
-    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x: coords.x, y: coords.y,
-      button: "left", clickCount: 1
-    });
-    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: coords.x, y: coords.y,
-      button: "left", clickCount: 1
-    });
-
-    return { success: true, x: coords.x, y: coords.y };
+    await dispatchClick(tabId, coords.x, coords.y);
+    return { success: true, data: { x: coords.x, y: coords.y } };
   } catch (error) {
     return { success: false, error: error.message };
   }
 }
 
 async function clickByText(tabId, text, exact = false) {
-  if (!state.attachedTabs.has(tabId)) {
-    return { error: "Tab not attached. Call attach first." };
-  }
+  requireAttached(tabId);
 
   try {
-    // Find element by visible text content
     const findResult = await chrome.debugger.sendCommand(
       { tabId },
       "Runtime.evaluate",
@@ -357,16 +360,14 @@ async function clickByText(tabId, text, exact = false) {
             const text = ${JSON.stringify(text)};
             const exact = ${JSON.stringify(exact)};
 
-            // Use TreeWalker to find text nodes efficiently
             const walker = document.createTreeWalker(
               document.body,
               NodeFilter.SHOW_ELEMENT,
               {
                 acceptNode: function(node) {
                   const style = window.getComputedStyle(node);
-                  if (style.display === 'none' || style.visibility === 'hidden') {
-                    return NodeFilter.FILTER_REJECT;
-                  }
+                  if (style.display === 'none') return NodeFilter.FILTER_REJECT;
+                  if (style.visibility === 'hidden') return NodeFilter.FILTER_SKIP;
                   return NodeFilter.FILTER_ACCEPT;
                 }
               }
@@ -379,7 +380,6 @@ async function clickByText(tabId, text, exact = false) {
               if (!innerText) continue;
 
               if (exact ? innerText === text : innerText.includes(text)) {
-                // Prefer the deepest (most specific) match
                 match = el;
               }
             }
@@ -400,24 +400,20 @@ async function clickByText(tabId, text, exact = false) {
       }
     );
 
+    if (!findResult?.result?.value) {
+      return {
+        success: false,
+        error: findResult?.exceptionDetails?.text ?? `Failed to evaluate text search`
+      };
+    }
+
     const coords = JSON.parse(findResult.result.value);
     if (coords.error) {
       return { success: false, error: coords.error };
     }
 
-    // Click at computed coordinates
-    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x: coords.x, y: coords.y,
-      button: "left", clickCount: 1
-    });
-    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: coords.x, y: coords.y,
-      button: "left", clickCount: 1
-    });
-
-    return { success: true, x: coords.x, y: coords.y, matchedText: coords.matchedText };
+    await dispatchClick(tabId, coords.x, coords.y);
+    return { success: true, data: { x: coords.x, y: coords.y, matchedText: coords.matchedText } };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -440,7 +436,6 @@ function parseKeyCombo(keyCombo) {
     else key = part;
   }
 
-  // Build CDP modifier bitmask
   let modifierFlags = 0;
   if (modifiers.alt) modifierFlags |= 1;
   if (modifiers.ctrl) modifierFlags |= 2;
@@ -450,7 +445,6 @@ function parseKeyCombo(keyCombo) {
   return { key, modifiers: modifierFlags };
 }
 
-// Map special key names to CDP key codes
 const SPECIAL_KEYS = {
   'Enter': { code: 'Enter', keyCode: 13, key: 'Enter' },
   'Tab': { code: 'Tab', keyCode: 9, key: 'Tab' },
@@ -474,9 +468,7 @@ const SPECIAL_KEYS = {
 };
 
 async function pressKey(tabId, keyCombo) {
-  if (!state.attachedTabs.has(tabId)) {
-    return { error: "Tab not attached. Call attach first." };
-  }
+  requireAttached(tabId);
 
   try {
     const { key, modifiers } = parseKeyCombo(keyCombo);
@@ -500,7 +492,6 @@ async function pressKey(tabId, keyCombo) {
 
     await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", keyDown);
 
-    // For single printable characters without modifiers, also send a char event
     if (key.length === 1 && modifiers === 0 && !specialKey) {
       await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
         type: "char",
@@ -520,12 +511,12 @@ async function pressKey(tabId, keyCombo) {
 // ============== Wait Conditions ==============
 
 async function waitForCondition(tabId, { selector, text, networkIdle, timeout = 30000 }) {
-  if (!state.attachedTabs.has(tabId)) {
-    return { error: "Tab not attached. Call attach first." };
-  }
+  requireAttached(tabId);
 
   const startTime = Date.now();
   const pollInterval = 250;
+  let lastError = null;
+  let consecutiveErrors = 0;
 
   while (Date.now() - startTime < timeout) {
     try {
@@ -539,7 +530,7 @@ async function waitForCondition(tabId, { selector, text, networkIdle, timeout = 
           }
         );
         if (result.result?.value === true) {
-          return { success: true, condition: 'selector', elapsed: Date.now() - startTime };
+          return { success: true, data: { condition: 'selector', elapsed: Date.now() - startTime } };
         }
       }
 
@@ -553,75 +544,55 @@ async function waitForCondition(tabId, { selector, text, networkIdle, timeout = 
           }
         );
         if (result.result?.value === true) {
-          return { success: true, condition: 'text', elapsed: Date.now() - startTime };
+          return { success: true, data: { condition: 'text', elapsed: Date.now() - startTime } };
         }
       }
 
       if (networkIdle) {
-        // Check if no network requests are pending
         const capture = state.networkCapture.get(tabId);
         if (capture) {
           const pending = Array.from(capture.requests.values()).filter(r => r.status === null);
           if (pending.length === 0) {
-            // Wait an additional 2s to confirm idle
             await new Promise(r => setTimeout(r, 2000));
             const stillPending = Array.from(capture.requests.values()).filter(r => r.status === null);
             if (stillPending.length === 0) {
-              return { success: true, condition: 'networkIdle', elapsed: Date.now() - startTime };
+              return { success: true, data: { condition: 'networkIdle', elapsed: Date.now() - startTime } };
             }
           }
         } else {
-          // No network capture = no pending requests
-          return { success: true, condition: 'networkIdle', elapsed: Date.now() - startTime };
+          return {
+            success: false,
+            error: 'Network capture not enabled for this tab. Call network_enable first.'
+          };
         }
       }
+
+      lastError = null;
+      consecutiveErrors = 0;
     } catch (error) {
-      // Tab might be navigating, retry
+      lastError = error;
+      consecutiveErrors++;
+      if (consecutiveErrors >= 3) {
+        return {
+          success: false,
+          error: `Condition check failed repeatedly: ${error.message}`
+        };
+      }
     }
 
     await new Promise(r => setTimeout(r, pollInterval));
   }
 
-  return { success: false, error: `Timeout after ${timeout}ms` };
-}
-
-async function waitForDownloadComplete(tabId, timeout = 60000) {
-  // Listen for Browser.downloadProgress events via CDP
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      resolve({ success: false, error: `Download timeout after ${timeout}ms` });
-    }, timeout);
-
-    // Store a one-time listener for this download
-    const downloadKey = `download_${tabId}_${Date.now()}`;
-    state[downloadKey] = { resolve, timer };
-
-    // The CDP event listener will pick up Browser.downloadProgress
-    // and resolve this promise when state is 'completed'
-    const checkInterval = setInterval(() => {
-      if (state[downloadKey]?.completed) {
-        clearInterval(checkInterval);
-        clearTimeout(timer);
-        const data = state[downloadKey].data;
-        delete state[downloadKey];
-        resolve({ success: true, data });
-      }
-    }, 500);
-
-    // Cleanup on timeout
-    setTimeout(() => {
-      clearInterval(checkInterval);
-      delete state[downloadKey];
-    }, timeout + 1000);
-  });
+  return {
+    success: false,
+    error: lastError
+      ? `Timeout after ${timeout}ms (last error: ${lastError.message})`
+      : `Timeout after ${timeout}ms`
+  };
 }
 
 // ============== Network Capture ==============
 
-/**
- * Collect network requests in-memory per tab.
- * The CDP event listener stores request/response data when Network is enabled.
- */
 function ensureNetworkCapture(tabId) {
   if (!state.networkCapture.has(tabId)) {
     state.networkCapture.set(tabId, { requests: new Map() });
@@ -637,12 +608,10 @@ function getNetworkRequests(tabId, filter, allTypes) {
 
   let requests = Array.from(capture.requests.values());
 
-  // Filter to XHR/Fetch by default
   if (!allTypes) {
     requests = requests.filter(r => r.type === 'XHR' || r.type === 'Fetch');
   }
 
-  // URL filter
   if (filter) {
     requests = requests.filter(r => r.url.includes(filter));
   }
@@ -667,8 +636,8 @@ async function getNetworkRequestDetail(tabId, requestId) {
 
   const req = capture.requests.get(requestId);
 
-  // Fetch response body via CDP
   let responseBody = null;
+  let responseBodyError = null;
   try {
     const bodyResult = await chrome.debugger.sendCommand(
       { tabId },
@@ -676,8 +645,8 @@ async function getNetworkRequestDetail(tabId, requestId) {
       { requestId }
     );
     responseBody = bodyResult.body;
-  } catch {
-    // Response body may not be available (e.g., streaming, binary)
+  } catch (err) {
+    responseBodyError = err.message;
   }
 
   return {
@@ -690,6 +659,7 @@ async function getNetworkRequestDetail(tabId, requestId) {
       status: req.status,
       responseHeaders: req.responseHeaders ?? {},
       responseBody,
+      responseBodyError,
     }
   };
 }
@@ -713,7 +683,6 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       responseHeaders: null,
       responseSize: null,
     });
-    // Cap stored requests to avoid memory bloat
     if (capture.requests.size > 500) {
       const firstKey = capture.requests.keys().next().value;
       capture.requests.delete(firstKey);
@@ -747,12 +716,14 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 chrome.debugger.onDetach.addListener((source, reason) => {
   const tabId = source.tabId;
   state.attachedTabs.delete(tabId);
+  state.networkCapture.delete(tabId);
   updateBadge(tabId, "");
   console.log(`[Relay] Tab ${tabId} detached: ${reason}`);
   sendToRelay({ type: "tabDetached", tabId, reason });
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  state.networkCapture.delete(tabId);
   if (state.attachedTabs.has(tabId)) {
     state.attachedTabs.delete(tabId);
     sendToRelay({ type: "tabClosed", tabId });
@@ -761,7 +732,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // ============== Popup Message Handler ==============
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     const { action, tabId } = message;
 
@@ -782,12 +753,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ============== Keep-Alive ==============
 
-// Use chrome.alarms to keep service worker alive
-chrome.alarms.create("keepAlive", { periodInMinutes: 0.4 }); // ~24 seconds
+chrome.alarms.create("keepAlive", { periodInMinutes: 0.4 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "keepAlive") {
-    // Send ping to keep WebSocket alive
     if (state.wsConnection?.readyState === WebSocket.OPEN) {
       state.wsConnection.send(JSON.stringify({ type: "ping" }));
     }

@@ -29,12 +29,15 @@ export class Mutex {
 
 export class Guard {
   #mutex: Mutex;
+  #released = false;
 
   constructor(mutex: Mutex) {
     this.#mutex = mutex;
   }
 
   dispose(): void {
+    if (this.#released) return;
+    this.#released = true;
     this.#mutex.release();
   }
 }

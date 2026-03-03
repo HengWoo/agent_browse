@@ -5,6 +5,8 @@ import type { ToolContext } from '../ToolDefinition.js';
 
 import { waitFor, extractTable, extractLinks } from '../tools/extraction.js';
 
+// downloadMonitor removed — was dead code (waitForDownload never resolved in extension)
+
 function mockBridge(sendFn: (action: string, params: Record<string, unknown>) => BridgeResponse): ToolContext {
   return {
     bridge: {

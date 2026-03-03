@@ -69,7 +69,11 @@ export async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = async () => {
     logger('Shutting down...');
-    await bridge.close();
+    try {
+      await bridge.close();
+    } catch (err) {
+      logger('Error closing bridge: %O', err);
+    }
     httpServer.close();
     process.exit(0);
   };

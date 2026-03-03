@@ -1,6 +1,17 @@
 import { z } from 'zod';
 import { defineTool } from '../ToolDefinition.js';
 
+/**
+ * Unwrap the evaluation result from the bridge response.
+ * The extension returns { success: true, data: { result: { value: "..." } } }
+ * for Runtime.evaluate calls.
+ */
+function unwrapEvalResult(data: unknown): string | undefined {
+  if (typeof data === 'string') return data;
+  const obj = data as { result?: { value?: string } } | undefined;
+  return obj?.result?.value;
+}
+
 export const waitFor = defineTool({
   name: 'wait_for',
   description: 'Wait for a condition on the page: a CSS selector to appear, text to become visible, or network to go idle. Returns when the condition is met or timeout expires.',
@@ -52,7 +63,7 @@ export const extractTable = defineTool({
       expression: `
         (function() {
           const table = document.querySelector(${JSON.stringify(tableSelector)});
-          if (!table) return JSON.stringify({ error: "No table found matching: ${tableSelector}" });
+          if (!table) return JSON.stringify({ error: ${JSON.stringify('No table found matching: ' + tableSelector)} });
 
           const rows = [];
           const headerRow = table.querySelector('thead tr');
@@ -79,13 +90,18 @@ export const extractTable = defineTool({
       throw new Error(result.error ?? 'Failed to extract table');
     }
 
-    const resultData = result.data as { result?: { value?: string } } | string;
-    const rawValue = typeof resultData === 'string' ? resultData : (resultData as { result?: { value?: string } })?.result?.value;
+    const rawValue = unwrapEvalResult(result.data);
     if (!rawValue) {
       throw new Error('No evaluation result');
     }
 
-    const parsed = JSON.parse(rawValue);
+    let parsed: { rows?: unknown[][]; rowCount?: number; error?: string };
+    try {
+      parsed = JSON.parse(rawValue);
+    } catch {
+      throw new Error(`Failed to parse table data: ${rawValue.slice(0, 200)}`);
+    }
+
     if (parsed.error) {
       throw new Error(parsed.error);
     }
@@ -124,14 +140,19 @@ export const extractLinks = defineTool({
       throw new Error(result.error ?? 'Failed to extract links');
     }
 
-    const resultData = result.data as { result?: { value?: string } } | string;
-    const rawValue = typeof resultData === 'string' ? resultData : (resultData as { result?: { value?: string } })?.result?.value;
+    const rawValue = unwrapEvalResult(result.data);
     if (!rawValue) {
       response.appendText('No links found.');
       return;
     }
 
-    const links = JSON.parse(rawValue) as Array<{ text: string; href: string }>;
+    let links: Array<{ text: string; href: string }>;
+    try {
+      links = JSON.parse(rawValue);
+    } catch {
+      throw new Error(`Failed to parse links data: ${rawValue.slice(0, 200)}`);
+    }
+
     if (links.length === 0) {
       response.appendText('No links found.');
       return;
@@ -139,49 +160,5 @@ export const extractLinks = defineTool({
 
     const lines = links.map((l) => `- [${l.text || '(no text)'}](${l.href})`);
     response.appendText(`${links.length} links:\n\n${lines.join('\n')}`);
-  },
-});
-
-export const downloadMonitor = defineTool({
-  name: 'download_monitor',
-  description: 'Set up download behavior and monitor for file downloads. Uses CDP Browser.setDownloadBehavior. Returns when a download completes or timeout expires.',
-  schema: {
-    tabId: z.number().int().describe('The tab ID.'),
-    downloadPath: z.string().optional().describe('Directory to save downloads. Default /tmp/agent-browse-downloads.'),
-    timeout: z.number().int().optional().describe('Timeout in ms. Default 60000.'),
-  },
-  handler: async (request, response, context) => {
-    const { tabId, downloadPath, timeout } = request.params;
-    const dir = downloadPath ?? '/tmp/agent-browse-downloads';
-    const ms = timeout ?? 60000;
-
-    // Set download behavior
-    const setResult = await context.bridge.send('cdp', {
-      tabId,
-      method: 'Browser.setDownloadBehavior',
-      params: {
-        behavior: 'allowAndName',
-        downloadPath: dir,
-        eventsEnabled: true,
-      },
-    });
-
-    if (!setResult.success) {
-      throw new Error(setResult.error ?? 'Failed to set download behavior');
-    }
-
-    // Wait for download complete event
-    const waitResult = await context.bridge.send('waitForDownload', {
-      tabId,
-      timeout: ms,
-    }, ms + 5000);
-
-    if (!waitResult.success) {
-      response.appendText(`Download monitoring enabled (saving to ${dir}). No download completed within ${ms / 1000}s timeout.`);
-      return;
-    }
-
-    const dl = waitResult.data as { guid: string; suggestedFilename: string };
-    response.appendText(`Download completed: ${dl.suggestedFilename} (saved to ${dir})`);
   },
 });

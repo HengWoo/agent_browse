@@ -39,4 +39,23 @@ describe('Mutex', () => {
     const g2 = await mutex.acquire();
     g2.dispose();
   });
+
+  it('handles double-dispose without corrupting queue', async () => {
+    const mutex = new Mutex();
+    const g1 = await mutex.acquire();
+
+    // Queue up a second acquisition
+    const p2 = mutex.acquire();
+
+    // Double-dispose should not release the queued waiter twice
+    g1.dispose();
+    g1.dispose(); // second call is a no-op
+
+    const g2 = await p2;
+    g2.dispose();
+
+    // Mutex should be unlocked now — can acquire again
+    const g3 = await mutex.acquire();
+    g3.dispose();
+  });
 });
