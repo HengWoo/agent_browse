@@ -19,7 +19,6 @@ import * as scriptTools from './tools/script.js';
 import * as networkTools from './tools/network.js';
 import * as cookieTools from './tools/cookies.js';
 import * as extractionTools from './tools/extraction.js';
-import * as readerTools from './tools/reader.js';
 
 const PORT = parseInt(process.env.AGENT_BROWSE_PORT ?? '18800', 10);
 
@@ -52,7 +51,6 @@ export async function main(): Promise<void> {
     ...Object.values(networkTools),
     ...Object.values(cookieTools),
     ...Object.values(extractionTools),
-    ...Object.values(readerTools),
   ];
 
   allTools.sort((a, b) => a.name.localeCompare(b.name));
