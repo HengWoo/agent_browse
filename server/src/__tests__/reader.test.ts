@@ -14,8 +14,7 @@ function mockFetch(body: unknown, status = 200) {
   return vi.fn(async () => ({
     ok: status >= 200 && status < 300,
     status,
-    json: async () => body,
-    text: async () => JSON.stringify(body),
+    text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
   }));
 }
 
@@ -28,7 +27,7 @@ describe('jina_read', () => {
   });
 
   it('returns title and content from Jina response', async () => {
-    globalThis.fetch = mockFetch({
+    globalThis.fetch = mockFetch(JSON.stringify({
       code: 200,
       status: 200,
       data: {
@@ -37,7 +36,7 @@ describe('jina_read', () => {
         content: 'Hello world in **markdown**.',
         description: 'A test article.',
       },
-    }) as unknown as typeof fetch;
+    })) as unknown as typeof fetch;
 
     const response = new McpResponse();
     await jinaRead.handler(
@@ -75,7 +74,7 @@ describe('jina_read', () => {
 
   it('truncates content over 200KB', async () => {
     const largeContent = 'x'.repeat(300 * 1024);
-    globalThis.fetch = mockFetch({
+    globalThis.fetch = mockFetch(JSON.stringify({
       code: 200,
       status: 200,
       data: {
@@ -83,7 +82,7 @@ describe('jina_read', () => {
         title: 'Big Page',
         content: largeContent,
       },
-    }) as unknown as typeof fetch;
+    })) as unknown as typeof fetch;
 
     const response = new McpResponse();
     await jinaRead.handler(
@@ -101,11 +100,11 @@ describe('jina_read', () => {
   it('sends Authorization header when JINA_API_KEY is set', async () => {
     vi.stubEnv('JINA_API_KEY', 'test-key-123');
 
-    globalThis.fetch = mockFetch({
+    globalThis.fetch = mockFetch(JSON.stringify({
       code: 200,
       status: 200,
       data: { url: 'https://example.com', title: 'Test', content: 'OK' },
-    }) as unknown as typeof fetch;
+    })) as unknown as typeof fetch;
 
     const response = new McpResponse();
     await jinaRead.handler(
@@ -125,11 +124,11 @@ describe('jina_read', () => {
   });
 
   it('sends X-No-Cache header when noCache is true', async () => {
-    globalThis.fetch = mockFetch({
+    globalThis.fetch = mockFetch(JSON.stringify({
       code: 200,
       status: 200,
       data: { url: 'https://example.com', title: 'Test', content: 'OK' },
-    }) as unknown as typeof fetch;
+    })) as unknown as typeof fetch;
 
     const response = new McpResponse();
     await jinaRead.handler(
@@ -145,6 +144,73 @@ describe('jina_read', () => {
       }),
     );
   });
+
+  it('gives actionable error on network failure', async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError('fetch failed', { cause: new Error('ENOTFOUND r.jina.ai') });
+    }) as unknown as typeof fetch;
+
+    const response = new McpResponse();
+    await expect(
+      jinaRead.handler(
+        { params: { url: 'https://example.com' } },
+        response,
+        stubContext,
+      ),
+    ).rejects.toThrow('Failed to reach Jina Reader');
+  });
+
+  it('gives actionable error on malformed JSON response', async () => {
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => '<html>Rate limited</html>',
+    })) as unknown as typeof fetch;
+
+    const response = new McpResponse();
+    await expect(
+      jinaRead.handler(
+        { params: { url: 'https://example.com' } },
+        response,
+        stubContext,
+      ),
+    ).rejects.toThrow('invalid JSON');
+  });
+
+  it('throws on unexpected response shape (missing data)', async () => {
+    globalThis.fetch = mockFetch(JSON.stringify({
+      code: 200,
+      status: 200,
+      data: null,
+    })) as unknown as typeof fetch;
+
+    const response = new McpResponse();
+    await expect(
+      jinaRead.handler(
+        { params: { url: 'https://example.com' } },
+        response,
+        stubContext,
+      ),
+    ).rejects.toThrow('unexpected response');
+  });
+
+  it('falls back to "(no title)" when title is empty', async () => {
+    globalThis.fetch = mockFetch(JSON.stringify({
+      code: 200,
+      status: 200,
+      data: { url: 'https://example.com', title: '', content: 'Body text' },
+    })) as unknown as typeof fetch;
+
+    const response = new McpResponse();
+    await jinaRead.handler(
+      { params: { url: 'https://example.com' } },
+      response,
+      stubContext,
+    );
+
+    const text = (response.build('jina_read')[0] as { text: string }).text;
+    expect(text).toContain('**(no title)**');
+  });
 });
 
 describe('jina_search', () => {
@@ -158,14 +224,14 @@ describe('jina_search', () => {
   it('formats search results as numbered list', async () => {
     vi.stubEnv('JINA_API_KEY', 'test-key');
 
-    globalThis.fetch = mockFetch({
+    globalThis.fetch = mockFetch(JSON.stringify({
       code: 200,
       status: 200,
       data: [
         { title: 'Result One', url: 'https://one.com', content: 'First result content', description: 'First desc' },
         { title: 'Result Two', url: 'https://two.com', content: 'Second result content', description: 'Second desc' },
       ],
-    }) as unknown as typeof fetch;
+    })) as unknown as typeof fetch;
 
     const response = new McpResponse();
     await jinaSearch.handler(
@@ -196,14 +262,27 @@ describe('jina_search', () => {
     ).rejects.toThrow('JINA_API_KEY');
   });
 
+  it('throws when API key is whitespace-only', async () => {
+    vi.stubEnv('JINA_API_KEY', '  ');
+
+    const response = new McpResponse();
+    await expect(
+      jinaSearch.handler(
+        { params: { query: 'test' } },
+        response,
+        stubContext,
+      ),
+    ).rejects.toThrow('JINA_API_KEY');
+  });
+
   it('handles empty results', async () => {
     vi.stubEnv('JINA_API_KEY', 'test-key');
 
-    globalThis.fetch = mockFetch({
+    globalThis.fetch = mockFetch(JSON.stringify({
       code: 200,
       status: 200,
       data: [],
-    }) as unknown as typeof fetch;
+    })) as unknown as typeof fetch;
 
     const response = new McpResponse();
     await jinaSearch.handler(
@@ -217,14 +296,34 @@ describe('jina_search', () => {
     expect(text).toContain('No search results found');
   });
 
+  it('handles null data gracefully', async () => {
+    vi.stubEnv('JINA_API_KEY', 'test-key');
+
+    globalThis.fetch = mockFetch(JSON.stringify({
+      code: 200,
+      status: 200,
+      data: null,
+    })) as unknown as typeof fetch;
+
+    const response = new McpResponse();
+    await jinaSearch.handler(
+      { params: { query: 'test' } },
+      response,
+      stubContext,
+    );
+
+    const text = (response.build('jina_search')[0] as { text: string }).text;
+    expect(text).toContain('No search results found');
+  });
+
   it('encodes query in URL', async () => {
     vi.stubEnv('JINA_API_KEY', 'test-key');
 
-    globalThis.fetch = mockFetch({
+    globalThis.fetch = mockFetch(JSON.stringify({
       code: 200,
       status: 200,
       data: [],
-    }) as unknown as typeof fetch;
+    })) as unknown as typeof fetch;
 
     const response = new McpResponse();
     await jinaSearch.handler(
@@ -237,5 +336,58 @@ describe('jina_search', () => {
       'https://s.jina.ai/hello%20world%20%26%20more',
       expect.any(Object),
     );
+  });
+
+  it('throws on HTTP error', async () => {
+    vi.stubEnv('JINA_API_KEY', 'test-key');
+    globalThis.fetch = mockFetch('Service unavailable', 503) as unknown as typeof fetch;
+
+    const response = new McpResponse();
+    await expect(
+      jinaSearch.handler(
+        { params: { query: 'test' } },
+        response,
+        stubContext,
+      ),
+    ).rejects.toThrow('HTTP 503');
+  });
+
+  it('uses truncated content when description is absent', async () => {
+    vi.stubEnv('JINA_API_KEY', 'test-key');
+
+    globalThis.fetch = mockFetch(JSON.stringify({
+      code: 200,
+      status: 200,
+      data: [
+        { title: 'No Desc', url: 'https://x.com', content: 'A'.repeat(300) },
+      ],
+    })) as unknown as typeof fetch;
+
+    const response = new McpResponse();
+    await jinaSearch.handler(
+      { params: { query: 'test' } },
+      response,
+      stubContext,
+    );
+
+    const text = (response.build('jina_search')[0] as { text: string }).text;
+    expect(text).toContain('A'.repeat(200));
+    expect(text).not.toContain('A'.repeat(300));
+  });
+
+  it('gives actionable error on network failure', async () => {
+    vi.stubEnv('JINA_API_KEY', 'test-key');
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+
+    const response = new McpResponse();
+    await expect(
+      jinaSearch.handler(
+        { params: { query: 'test' } },
+        response,
+        stubContext,
+      ),
+    ).rejects.toThrow('Failed to reach Jina Search');
   });
 });

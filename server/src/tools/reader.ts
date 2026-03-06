@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { defineTool } from '../ToolDefinition.js';
 
 const MAX_CONTENT_BYTES = 200 * 1024; // 200KB
+const FETCH_TIMEOUT_MS = 30_000;
 
 interface JinaReadResponse {
   code: number;
@@ -31,11 +32,44 @@ function getJinaHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     'Accept': 'application/json',
   };
-  const key = process.env.JINA_API_KEY;
+  const key = process.env.JINA_API_KEY?.trim();
   if (key) {
     headers['Authorization'] = `Bearer ${key}`;
   }
   return headers;
+}
+
+/**
+ * Fetch with timeout and contextual error messages.
+ * Wraps network errors so callers get actionable messages instead of "fetch failed".
+ */
+async function jinaFetch(url: string, headers: Record<string, string>, label: string): Promise<Response> {
+  let res: Response;
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  } catch (err) {
+    const cause = (err as Error).cause ?? err;
+    throw new Error(`Failed to reach ${label}: ${(cause as Error).message ?? String(err)}`);
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '(response body unreadable)');
+    throw new Error(`${label} returned HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
+
+  return res;
+}
+
+/**
+ * Parse JSON response with contextual error on malformed bodies.
+ */
+async function parseJsonResponse<T>(res: Response, label: string): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`${label} returned invalid JSON. Body preview: ${text.slice(0, 200)}`);
+  }
 }
 
 export const jinaRead = defineTool({
@@ -54,13 +88,13 @@ export const jinaRead = defineTool({
       headers['X-No-Cache'] = 'true';
     }
 
-    const res = await fetch(`https://r.jina.ai/${url}`, { headers });
+    const res = await jinaFetch(`https://r.jina.ai/${url}`, headers, 'Jina Reader');
+    const json = await parseJsonResponse<JinaReadResponse>(res, 'Jina Reader');
 
-    if (!res.ok) {
-      throw new Error(`Jina Reader returned HTTP ${res.status}: ${await res.text()}`);
+    if (!json.data || typeof json.data.content !== 'string') {
+      throw new Error('Jina Reader returned an unexpected response (missing data.content).');
     }
 
-    const json = (await res.json()) as JinaReadResponse;
     let content = json.data.content;
 
     if (Buffer.byteLength(content, 'utf-8') > MAX_CONTENT_BYTES) {
@@ -83,27 +117,26 @@ export const jinaSearch = defineTool({
   handler: async (request, response, _context) => {
     const { query } = request.params;
 
-    if (!process.env.JINA_API_KEY) {
+    if (!process.env.JINA_API_KEY?.trim()) {
       throw new Error('JINA_API_KEY environment variable is required for jina_search.');
     }
 
     const headers = getJinaHeaders();
-    const res = await fetch(`https://s.jina.ai/${encodeURIComponent(query)}`, { headers });
-
-    if (!res.ok) {
-      throw new Error(`Jina Search returned HTTP ${res.status}: ${await res.text()}`);
-    }
-
-    const json = (await res.json()) as JinaSearchResponse;
+    const res = await jinaFetch(
+      `https://s.jina.ai/${encodeURIComponent(query)}`,
+      headers,
+      'Jina Search',
+    );
+    const json = await parseJsonResponse<JinaSearchResponse>(res, 'Jina Search');
     const results = json.data;
 
-    if (!results || results.length === 0) {
+    if (!Array.isArray(results) || results.length === 0) {
       response.appendText('No search results found.');
       return;
     }
 
     const lines = results.map((r, i) => {
-      const snippet = r.description || r.content.slice(0, 200);
+      const snippet = r.description || (r.content?.slice(0, 200) ?? '');
       return `${i + 1}. **${r.title}**\n   ${r.url}\n   ${snippet}`;
     });
 
