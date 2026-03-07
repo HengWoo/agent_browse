@@ -153,3 +153,114 @@ describe('ExtensionBridge', () => {
     expect(events[0].method).toBe('Network.responseReceived');
   });
 });
+
+describe('ExtensionBridge version handshake', () => {
+  let server: http.Server;
+  let clientWs: WebSocket | null = null;
+
+  afterEach(async () => {
+    if (clientWs && clientWs.readyState === WebSocket.OPEN) {
+      clientWs.close();
+      clientWs = null;
+    }
+  });
+
+  async function setup(serverVersion: string) {
+    const bridge = new ExtensionBridge(TEST_PORT + 1, 30000, serverVersion);
+    server = http.createServer();
+    bridge.start(server);
+    await new Promise<void>((resolve) => server.listen(TEST_PORT + 1, '127.0.0.1', resolve));
+    return bridge;
+  }
+
+  async function teardown(bridge: ExtensionBridge) {
+    await bridge.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  async function connectClient(): Promise<WebSocket> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${TEST_PORT + 1}/ws`);
+      ws.on('open', () => {
+        clientWs = ws;
+        resolve(ws);
+      });
+      ws.on('error', reject);
+    });
+  }
+
+  it('returns no warning when versions match', async () => {
+    const bridge = await setup('0.2.0');
+    const ws = await connectClient();
+
+    ws.send(JSON.stringify({ type: 'hello', version: '0.2.0' }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(bridge.versionWarning).toBeNull();
+    await teardown(bridge);
+  });
+
+  it('returns warning when versions mismatch', async () => {
+    const bridge = await setup('0.2.0');
+    const ws = await connectClient();
+
+    ws.send(JSON.stringify({ type: 'hello', version: '0.1.0' }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(bridge.versionWarning).toContain('0.1.0');
+    expect(bridge.versionWarning).toContain('0.2.0');
+    expect(bridge.versionWarning).toContain('chrome://extensions');
+    await teardown(bridge);
+  });
+
+  it('warns when connected but no hello received', async () => {
+    const bridge = await setup('0.2.0');
+    await connectClient();
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(bridge.versionWarning).toContain('did not report its version');
+    await teardown(bridge);
+  });
+
+  it('returns no warning when not connected', async () => {
+    const bridge = await setup('0.2.0');
+    expect(bridge.versionWarning).toBeNull();
+    await teardown(bridge);
+  });
+
+  it('resets version on reconnect', async () => {
+    const bridge = await setup('0.2.0');
+
+    // First connection sends matching hello
+    const ws1 = await connectClient();
+    ws1.send(JSON.stringify({ type: 'hello', version: '0.2.0' }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bridge.versionWarning).toBeNull();
+
+    // Disconnect
+    ws1.close();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Reconnect without sending hello — should warn, not carry stale version
+    clientWs = null;
+    const ws2 = await connectClient();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bridge.versionWarning).toContain('did not report its version');
+
+    ws2.close();
+    clientWs = null;
+    await new Promise((r) => setTimeout(r, 50));
+    await teardown(bridge);
+  });
+
+  it('treats non-string version in hello as missing', async () => {
+    const bridge = await setup('0.2.0');
+    const ws = await connectClient();
+
+    ws.send(JSON.stringify({ type: 'hello', version: 123 }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(bridge.versionWarning).toContain('did not report its version');
+    await teardown(bridge);
+  });
+});

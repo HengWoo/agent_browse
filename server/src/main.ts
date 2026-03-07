@@ -6,8 +6,13 @@ import { McpResponse } from './McpResponse.js';
 import { Mutex } from './Mutex.js';
 import { createHttpServer } from './http-server.js';
 import { logger } from './logger.js';
+import { readFileSync } from 'node:fs';
 
 import type { AnyToolDef } from './ToolDefinition.js';
+
+const SERVER_VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf-8'),
+).version as string;
 
 // Tool modules
 import * as tabTools from './tools/tabs.js';
@@ -23,7 +28,7 @@ import * as extractionTools from './tools/extraction.js';
 const PORT = parseInt(process.env.AGENT_BROWSE_PORT ?? '18800', 10);
 
 export async function main(): Promise<void> {
-  const bridge = new ExtensionBridge(PORT);
+  const bridge = new ExtensionBridge(PORT, 30000, SERVER_VERSION);
   const toolMutex = new Mutex();
 
   // Start HTTP server + WebSocket (attach WSS only after successful listen)
@@ -53,7 +58,7 @@ export async function main(): Promise<void> {
   // MCP server
   const server = new McpServer({
     name: 'agent-browse',
-    version: '0.1.0',
+    version: SERVER_VERSION,
   });
 
   // Collect and register all tools
@@ -128,6 +133,10 @@ function registerTool(
         );
 
         const content = response.build(tool.name);
+        const warning = bridge.versionWarning;
+        if (warning) {
+          content.unshift({ type: 'text' as const, text: `⚠️ ${warning}` });
+        }
         return { content };
       } catch (err) {
         logger('%s error: %s', tool.name, (err as Error).message);
