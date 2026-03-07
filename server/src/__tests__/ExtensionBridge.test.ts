@@ -213,12 +213,54 @@ describe('ExtensionBridge version handshake', () => {
     await teardown(bridge);
   });
 
-  it('returns no warning when no hello received', async () => {
+  it('warns when connected but no hello received', async () => {
     const bridge = await setup('0.2.0');
     await connectClient();
     await new Promise((r) => setTimeout(r, 50));
 
+    expect(bridge.versionWarning).toContain('did not report its version');
+    await teardown(bridge);
+  });
+
+  it('returns no warning when not connected', async () => {
+    const bridge = await setup('0.2.0');
     expect(bridge.versionWarning).toBeNull();
+    await teardown(bridge);
+  });
+
+  it('resets version on reconnect', async () => {
+    const bridge = await setup('0.2.0');
+
+    // First connection sends matching hello
+    const ws1 = await connectClient();
+    ws1.send(JSON.stringify({ type: 'hello', version: '0.2.0' }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bridge.versionWarning).toBeNull();
+
+    // Disconnect
+    ws1.close();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Reconnect without sending hello — should warn, not carry stale version
+    clientWs = null;
+    const ws2 = await connectClient();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bridge.versionWarning).toContain('did not report its version');
+
+    ws2.close();
+    clientWs = null;
+    await new Promise((r) => setTimeout(r, 50));
+    await teardown(bridge);
+  });
+
+  it('treats non-string version in hello as missing', async () => {
+    const bridge = await setup('0.2.0');
+    const ws = await connectClient();
+
+    ws.send(JSON.stringify({ type: 'hello', version: 123 }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(bridge.versionWarning).toContain('did not report its version');
     await teardown(bridge);
   });
 });

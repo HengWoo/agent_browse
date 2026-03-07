@@ -55,7 +55,12 @@ export class ExtensionBridge {
   }
 
   get versionWarning(): string | null {
-    if (!this.#extensionVersion) return null;
+    if (!this.#extensionVersion) {
+      if (this.isConnected) {
+        return 'Extension connected but did not report its version — it may be outdated. Reload from chrome://extensions';
+      }
+      return null;
+    }
     if (this.#extensionVersion === this.#serverVersion) return null;
     return `Extension version ${this.#extensionVersion} does not match server ${this.#serverVersion} — reload extension from chrome://extensions`;
   }
@@ -76,6 +81,7 @@ export class ExtensionBridge {
         this.#extensionWs.close();
       }
       this.#extensionWs = ws;
+      this.#extensionVersion = null;
 
       ws.on('message', (raw) => {
         try {
@@ -90,6 +96,7 @@ export class ExtensionBridge {
         logger('Extension disconnected');
         if (this.#extensionWs === ws) {
           this.#extensionWs = null;
+          this.#extensionVersion = null;
         }
         // Reject all pending requests — extension gone
         for (const [, pending] of this.#pendingRequests) {
@@ -165,10 +172,15 @@ export class ExtensionBridge {
 
     // Version handshake
     if (msg.type === 'hello') {
-      this.#extensionVersion = (msg.version as string) ?? null;
+      if (typeof msg.version !== 'string') {
+        logger('WARNING: Extension sent hello without valid version (got %O)', msg.version);
+        this.#extensionVersion = null;
+      } else {
+        this.#extensionVersion = msg.version;
+      }
       if (this.versionWarning) {
         logger('WARNING: %s', this.versionWarning);
-      } else {
+      } else if (this.#extensionVersion) {
         logger('Extension version %s matches server', this.#extensionVersion);
       }
       return;

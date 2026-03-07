@@ -16,7 +16,7 @@
 const RELAY_WS_URL = "ws://127.0.0.1:18800/ws";
 const RECONNECT_INTERVAL = 5000;
 const KEEPALIVE_INTERVAL = 20000; // Keep service worker alive
-const EXTENSION_VERSION = "0.2.0";
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
 // ============== State ==============
 const state = {
