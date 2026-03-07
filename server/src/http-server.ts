@@ -7,7 +7,7 @@ import type { ExtensionBridge } from './ExtensionBridge.js';
  * HTTP endpoints for backward compatibility with browse-cli.sh and external scripts.
  * These replicate the original relay_server.py HTTP API.
  */
-export function createHttpServer(bridge: ExtensionBridge): http.Server {
+export function createHttpServer(bridge: ExtensionBridge, version: string = '0.0.0'): http.Server {
   const app = express();
   app.use(express.json());
 
@@ -23,7 +23,7 @@ export function createHttpServer(bridge: ExtensionBridge): http.Server {
   app.get('/', (_req: Request, res: Response) => {
     res.json({
       server: 'agent-browse-mcp',
-      version: '0.1.0',
+      version,
       extensionConnected: bridge.isConnected,
     });
   });
