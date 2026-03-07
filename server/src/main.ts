@@ -26,13 +26,29 @@ export async function main(): Promise<void> {
   const bridge = new ExtensionBridge(PORT);
   const toolMutex = new Mutex();
 
-  // Start HTTP server + WebSocket
+  // Start HTTP server + WebSocket (attach WSS only after successful listen)
   const httpServer = createHttpServer(bridge);
-  bridge.start(httpServer);
 
-  httpServer.listen(PORT, '127.0.0.1', () => {
-    logger('HTTP + WebSocket server listening on http://127.0.0.1:%d', PORT);
-  });
+  let httpListening = false;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      httpServer.once('error', reject);
+      httpServer.listen(PORT, '127.0.0.1', () => {
+        httpServer.removeListener('error', reject);
+        httpListening = true;
+        bridge.start(httpServer);
+        logger('HTTP + WebSocket server listening on http://127.0.0.1:%d', PORT);
+        resolve();
+      });
+    });
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EADDRINUSE') {
+      logger('Port %d already in use — continuing with MCP stdio only', PORT);
+    } else {
+      throw err;
+    }
+  }
 
   // MCP server
   const server = new McpServer({
@@ -74,7 +90,7 @@ export async function main(): Promise<void> {
     } catch (err) {
       logger('Error closing bridge: %O', err);
     }
-    httpServer.close();
+    if (httpListening) httpServer.close();
     process.exit(0);
   };
 
