@@ -32,7 +32,7 @@ export async function main(): Promise<void> {
   const toolMutex = new Mutex();
 
   // Start HTTP server + WebSocket (attach WSS only after successful listen)
-  const httpServer = createHttpServer(bridge);
+  const httpServer = createHttpServer(bridge, SERVER_VERSION);
 
   let httpListening = false;
   try {
