@@ -37,10 +37,13 @@ export class ExtensionBridge {
   #cdpEventHandlers: CdpEventHandler[] = [];
   #defaultTimeout: number;
   #port: number;
+  #serverVersion: string;
+  #extensionVersion: string | null = null;
 
-  constructor(port: number = 18800, defaultTimeout: number = 30000) {
+  constructor(port: number = 18800, defaultTimeout: number = 30000, serverVersion: string = '0.0.0') {
     this.#port = port;
     this.#defaultTimeout = defaultTimeout;
+    this.#serverVersion = serverVersion;
   }
 
   get port(): number {
@@ -49,6 +52,12 @@ export class ExtensionBridge {
 
   get isConnected(): boolean {
     return this.#extensionWs?.readyState === WebSocket.OPEN;
+  }
+
+  get versionWarning(): string | null {
+    if (!this.#extensionVersion) return null;
+    if (this.#extensionVersion === this.#serverVersion) return null;
+    return `Extension version ${this.#extensionVersion} does not match server ${this.#serverVersion} — reload extension from chrome://extensions`;
   }
 
   /**
@@ -150,6 +159,17 @@ export class ExtensionBridge {
         } catch (err) {
           logger('CDP event handler error for %s: %O', method, err);
         }
+      }
+      return;
+    }
+
+    // Version handshake
+    if (msg.type === 'hello') {
+      this.#extensionVersion = (msg.version as string) ?? null;
+      if (this.versionWarning) {
+        logger('WARNING: %s', this.versionWarning);
+      } else {
+        logger('Extension version %s matches server', this.#extensionVersion);
       }
       return;
     }

@@ -16,6 +16,7 @@
 const RELAY_WS_URL = "ws://127.0.0.1:18800/ws";
 const RECONNECT_INTERVAL = 5000;
 const KEEPALIVE_INTERVAL = 20000; // Keep service worker alive
+const EXTENSION_VERSION = "0.2.0";
 
 // ============== State ==============
 const state = {
@@ -66,7 +67,8 @@ function connectToRelay() {
       console.log("[Relay] Connected to relay server");
       state.wsConnected = true;
       sendToRelay({
-        type: "status",
+        type: "hello",
+        version: EXTENSION_VERSION,
         attachedTabs: Array.from(state.attachedTabs.keys())
       });
     };
