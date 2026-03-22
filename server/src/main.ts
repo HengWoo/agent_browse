@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
 import express from 'express';
 import http from 'node:http';
@@ -63,13 +64,7 @@ export async function main(): Promise<void> {
     }
   }
 
-  // MCP server
-  const server = new McpServer({
-    name: 'agent-browse',
-    version: SERVER_VERSION,
-  });
-
-  // Collect and register all tools
+  // Collect all tool definitions (shared across all MCP server instances)
   const allTools: AnyToolDef[] = [
     ...Object.values(tabTools),
     ...Object.values(navigationTools),
@@ -81,26 +76,29 @@ export async function main(): Promise<void> {
     ...Object.values(cookieTools),
     ...Object.values(extractionTools),
   ];
-
   allTools.sort((a, b) => a.name.localeCompare(b.name));
 
-  for (const tool of allTools) {
-    registerTool(server, tool, bridge);
+  // Factory: creates a new McpServer with all tools registered
+  function createMcpServer(): McpServer {
+    const s = new McpServer({ name: 'agent-browse', version: SERVER_VERSION });
+    for (const tool of allTools) {
+      registerTool(s, tool, bridge);
+    }
+    return s;
   }
 
-  logger('Registered %d tools', allTools.length);
+  logger('Tool definitions loaded: %d tools', allTools.length);
 
   // Connect MCP transport
   let mcpHttpServer: http.Server | undefined;
   const useRemoteMcp = MCP_PORT > 0 || process.env.AGENT_BROWSE_MCP_SAME_PORT === '1';
 
   if (useRemoteMcp) {
-    // Remote mode: Streamable HTTP transport (stateless — auth is external)
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
+    // Remote mode: Streamable HTTP with per-session server+transport pairs.
+    // The MCP SDK requires a fresh transport per session (stateless transports
+    // are single-use; session transports track state per session ID).
+    const sessions = new Map<string, StreamableHTTPServerTransport>();
 
-    // Choose which Express app to mount on
     const mountOnSamePort = MCP_PORT === 0 || MCP_PORT === PORT;
     if (mountOnSamePort && !httpListening) {
       throw new Error(
@@ -137,7 +135,38 @@ export async function main(): Promise<void> {
 
     mcpApp.all('/mcp', async (req, res) => {
       try {
-        await transport.handleRequest(req, res, req.body);
+        const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+        if (sessionId && sessions.has(sessionId)) {
+          // Existing session — reuse transport
+          const transport = sessions.get(sessionId)!;
+          await transport.handleRequest(req, res, req.body);
+        } else if (!sessionId && isInitializeRequest(req.body)) {
+          // New session — create server + transport
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (sid: string) => {
+              sessions.set(sid, transport);
+              logger('MCP session created: %s (active: %d)', sid, sessions.size);
+            },
+          });
+          transport.onclose = () => {
+            const sid = transport.sessionId;
+            if (sid && sessions.has(sid)) {
+              sessions.delete(sid);
+              logger('MCP session closed: %s (active: %d)', sid, sessions.size);
+            }
+          };
+          const server = createMcpServer();
+          await server.connect(transport);
+          await transport.handleRequest(req, res, req.body);
+        } else {
+          res.status(400).json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
+            id: null,
+          });
+        }
       } catch (err) {
         logger('MCP transport error: %O', err);
         if (!res.headersSent) {
@@ -147,7 +176,7 @@ export async function main(): Promise<void> {
     });
 
     if (mountOnSamePort) {
-      logger('MCP mounted on same port %d at /mcp', PORT);
+      logger('MCP mounted on same port %d at /mcp (session mode)', PORT);
     } else {
       mcpHttpServer = http.createServer(mcpApp);
       await new Promise<void>((resolve, reject) => {
@@ -160,10 +189,10 @@ export async function main(): Promise<void> {
       });
     }
 
-    await server.connect(transport);
-    logger('MCP server connected via Streamable HTTP');
+    logger('MCP ready via Streamable HTTP (session mode)');
   } else {
-    // Local mode: stdio transport
+    // Local mode: stdio transport — single server instance
+    const server = createMcpServer();
     const transport = new StdioServerTransport();
     await server.connect(transport);
     logger('MCP server connected via stdio');
@@ -205,7 +234,16 @@ function registerTool(
       inputSchema: tool.schema,
     },
     async (params: Record<string, unknown>, extra: { authInfo?: { clientId?: string } }) => {
-      const userId = extra?.authInfo?.clientId ?? '__local__';
+      let userId = extra?.authInfo?.clientId ?? '__local__';
+      // Fallback: if resolved userId has no connection, use first connected user
+      if (!bridge.isConnected(userId)) {
+        const connected = bridge.getConnectedUserIds();
+        console.error(`[agent-browse] userId=${userId} not connected, connected users: ${JSON.stringify(connected)}`);
+        if (connected.length > 0) {
+          console.error(`[agent-browse] Falling back to ${connected[0]}`);
+          userId = connected[0];
+        }
+      }
       const userMutex = bridge.getMutex(userId);
       const guard = await userMutex.acquire();
 
