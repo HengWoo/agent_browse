@@ -1,0 +1,48 @@
+services:
+  steel-browser:
+    image: ghcr.io/steel-dev/steel-browser:latest
+    entrypoint: ["/app/entrypoint-wrapper.sh"]
+    ports:
+      - "127.0.0.1:3001:3000"    # Steel API (localhost only)
+      - "127.0.0.1:18800:18800"  # WS + HTTP API (extension connects here)
+      - "127.0.0.1:18801:18801"  # MCP HTTP (Claude Code connects here)
+    volumes:
+      - chrome-data:/tmp/steel-chrome
+      - ../extension:/app/api/extensions/agent-browse:ro
+      - ./entrypoint-wrapper.sh:/app/entrypoint-wrapper.sh:ro
+      - ./cache:/app/.cache
+    environment:
+      - STEEL_LOG_LEVEL=info
+    shm_size: '2gb'
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  agent-browse:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    network_mode: "service:steel-browser"
+    environment:
+      - AGENT_BROWSE_PORT=18800
+      - AGENT_BROWSE_HOST=0.0.0.0
+      - AGENT_BROWSE_MCP_PORT=18801
+      - AGENT_BROWSE_MCP_HOST=0.0.0.0
+      - AGENT_BROWSE_USERS=${AGENT_BROWSE_USERS:-}
+      - AGENT_BROWSE_AUTH_TOKEN=${AGENT_BROWSE_AUTH_TOKEN:-}
+      - NODE_OPTIONS=--max-old-space-size=512
+      - DEBUG=agent-browse
+    restart: unless-stopped
+    depends_on:
+      steel-browser:
+        condition: service_healthy
+
+volumes:
+  chrome-data:

@@ -6,23 +6,28 @@ let currentTabId = null;
 let isAttached = false;
 
 async function init() {
-  // Get current tab
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabId = tab.id;
-
-  // Update UI with tab info
   document.getElementById("tabUrl").textContent = tab.url.slice(0, 50) + (tab.url.length > 50 ? "..." : "");
 
-  // Check if already attached
-  const response = await chrome.runtime.sendMessage({
-    action: "status",
-    tabId: currentTabId
-  });
+  try {
+    const response = await chrome.runtime.sendMessage({
+      action: "status",
+      tabId: currentTabId
+    });
+    if (chrome.runtime.lastError || !response) {
+      document.getElementById("status").textContent = "Extension not ready — try reopening popup";
+      document.getElementById("status").className = "status detached";
+      return;
+    }
+    isAttached = response.attached ?? false;
+  } catch {
+    document.getElementById("status").textContent = "Cannot reach extension background";
+    document.getElementById("status").className = "status detached";
+    return;
+  }
 
-  isAttached = response.attached;
   updateUI();
-
-  // Set up button handler
   document.getElementById("toggleBtn").addEventListener("click", toggleAttachment);
 }
 
@@ -46,18 +51,24 @@ function updateUI() {
 async function toggleAttachment() {
   const action = isAttached ? "detach" : "attach";
 
-  const response = await chrome.runtime.sendMessage({
-    action,
-    tabId: currentTabId
-  });
-
-  if (response.success) {
-    isAttached = !isAttached;
-    updateUI();
-  } else {
-    alert(`Failed to ${action}: ${response.error}`);
+  try {
+    const response = await chrome.runtime.sendMessage({
+      action,
+      tabId: currentTabId
+    });
+    if (chrome.runtime.lastError || !response) {
+      alert(`Failed to ${action}: extension not responding`);
+      return;
+    }
+    if (response.success) {
+      isAttached = !isAttached;
+      updateUI();
+    } else {
+      alert(`Failed to ${action}: ${response.error}`);
+    }
+  } catch {
+    alert(`Failed to ${action}: cannot reach extension background`);
   }
 }
 
-// Initialize when popup opens
 init();

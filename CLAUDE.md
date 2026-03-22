@@ -5,11 +5,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Start the relay server
+# Python relay server (legacy, replaced by Node MCP server)
 uv run python relay_server.py
 
-# Run any Python file
-uv run python <file.py>
+# Node MCP server (primary)
+cd server && npm run dev          # Development with tsx
+cd server && npm run build        # Compile TypeScript
+cd server && npm start            # Run compiled output
+
+# Tests
+cd server && npm test             # Run all vitest tests
+cd server && npx vitest run src/__tests__/tools.test.ts  # Single test file
+
+# Plugin shell tests
+bash tests/test_plugin_structure.sh
+bash tests/test_relay_health.sh
 ```
 
 ## Architecture
@@ -17,46 +27,56 @@ uv run python <file.py>
 Browser automation system using real Chrome sessions (anti-bot friendly):
 
 ```
-Claude Code ──HTTP──► Relay Server ◄──WebSocket──► Chrome Extension ──debugger API──► Browser Tab
+Claude Code ──MCP/stdio──► MCP Server (server/)
+                               │
+                          HTTP + WebSocket on 127.0.0.1:18800
+                               │
+Chrome Extension ──WebSocket──►┘  (extension connects to /ws)
+     │
+     └── chrome.debugger API ──► Browser Tab
 ```
 
-### Components
+### Two Server Implementations
 
-**relay_server.py** - Python aiohttp server on `127.0.0.1:18800`:
-- HTTP API for Claude Code (endpoints: `/tabs`, `/attach`, `/navigate`, `/click`, `/type`, `/evaluate`, `/screenshot`, `/cdp`)
-- WebSocket endpoint (`/ws`) for extension connection
-- Request/response matching via UUID-based message IDs in `pending_requests` dict
+1. **`server/`** (TypeScript, primary) — MCP server using `@modelcontextprotocol/sdk`. Exposes tools via stdio for Claude Code, plus an HTTP API on port 18800 for backward compatibility.
+2. **`relay_server.py`** (Python, legacy) — Standalone aiohttp server on port 18800. HTTP-only, no MCP. Kept for reference but superseded by the Node server.
 
-**extension/** - Chrome Manifest V3 extension:
-- `background.js` - Service worker handling WebSocket relay and Chrome Debugger API (CDP)
-- Uses `chrome.debugger` to attach/control tabs
-- Maintains `state.attachedTabs` Map for tracking debugger sessions
-- Keep-alive via `chrome.alarms` (service workers have ~30s idle timeout)
+Both use the same protocol: extension connects to `ws://127.0.0.1:18800/ws`, commands are JSON with UUID-based request/response correlation.
 
-### Key Design Decisions
+### MCP Server Internals (`server/src/`)
 
-- Uses Chrome's native debugger API instead of Playwright/Puppeteer to avoid automation detection
-- Extension must attach to tab before any CDP commands work (error: "Tab not attached")
-- Chrome detaches debugger when DevTools opens on the same tab
-- WebSocket auto-reconnects every 5 seconds if relay server restarts
+- **`main.ts`** — Boots HTTP server, WebSocket bridge, and MCP stdio transport. Registers all tools with a mutex (extension processes commands sequentially).
+- **`ExtensionBridge.ts`** — WebSocket bridge to Chrome extension. Single-connection model (new connection replaces old). Handles version handshake, request/response matching, and CDP event forwarding.
+- **`ToolDefinition.ts`** — `defineTool()` pattern: each tool is `{ name, description, schema (Zod), handler }`. Tools are organized by domain in `tools/` directory.
+- **`McpResponse.ts`** — Builder for MCP responses (text + images). Tool handlers call `appendText()`/`attachImage()`, then `build()` produces the content array.
+- **`http-server.ts`** — Express routes replicating `relay_server.py` HTTP API for backward compatibility with `browse-cli.sh` and curl.
+- **`Mutex.ts`** — Ensures only one tool handler runs at a time (critical for sequential extension processing).
+- **`tools/`** — One file per domain: tabs, navigation, input, screenshot, snapshot, script, network, cookies, extraction.
 
-## API Usage
+### Chrome Extension (`extension/`)
 
-All POST endpoints require `{tabId}` in body. Get tab IDs from `GET /tabs`.
+- **`background.js`** — Service worker. Connects to relay via WebSocket, handles all CDP commands via `chrome.debugger` API.
+- **`popup.js`** / **`popup.html`** — UI for attach/detach per tab.
+- **`manifest.json`** — Manifest V3, version must stay in sync with `server/package.json` version (version handshake in `ExtensionBridge`).
+- Keep-alive via `chrome.alarms` (service workers have ~30s idle timeout).
+- Network capture: in-memory Map per tab, capped at 500 requests, auto-cleaned on tab close/detach.
 
-```bash
-# List tabs
-curl http://127.0.0.1:18800/tabs
+### Plugin (`plugin/`)
 
-# Attach debugger to tab (required before other commands)
-curl -X POST http://127.0.0.1:18800/attach -d '{"tabId": 123}'
+Claude Code plugin providing `/browse` and `/browse-status` commands, a `browser-automation` agent, and the `browser-relay` skill with CDP reference docs.
 
-# Navigate, click, type, screenshot
-curl -X POST http://127.0.0.1:18800/navigate -d '{"tabId": 123, "url": "..."}'
-curl -X POST http://127.0.0.1:18800/click -d '{"tabId": 123, "x": 100, "y": 200}'
-curl -X POST http://127.0.0.1:18800/type -d '{"tabId": 123, "text": "hello"}'
-curl -X POST http://127.0.0.1:18800/screenshot -d '{"tabId": 123}'
+## Key Design Decisions
 
-# Raw CDP command
-curl -X POST http://127.0.0.1:18800/cdp -d '{"tabId": 123, "method": "DOM.getDocument", "params": {}}'
-```
+- Uses Chrome's native debugger API instead of Playwright/Puppeteer to avoid automation detection.
+- Extension must `attach` to a tab before any CDP commands work (error: "Tab not attached").
+- Chrome detaches the debugger when DevTools opens on the same tab — cannot use both simultaneously.
+- WebSocket auto-reconnects every 5 seconds if relay server restarts.
+- All MCP tool handlers are serialized through a mutex because the extension processes commands one at a time.
+- Port configurable via `AGENT_BROWSE_PORT` env var (default 18800). If port is in use, MCP stdio still works.
+
+## Adding a New MCP Tool
+
+1. Create or edit a file in `server/src/tools/`.
+2. Use `defineTool()` with Zod schema and async handler.
+3. Export the tool — `main.ts` auto-collects all exports from tool modules.
+4. The handler receives `(request, response, context)`: use `context.bridge.send(action, params)` to talk to the extension, and `response.appendText()` / `response.attachImage()` to build the MCP response.
