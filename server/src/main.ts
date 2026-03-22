@@ -91,13 +91,38 @@ export async function main(): Promise<void> {
 
   // Connect MCP transport
   let mcpHttpServer: http.Server | undefined;
+  let mcpCleanup: (() => void) | undefined;
   const useRemoteMcp = MCP_PORT > 0 || process.env.AGENT_BROWSE_MCP_SAME_PORT === '1';
 
   if (useRemoteMcp) {
     // Remote mode: Streamable HTTP with per-session server+transport pairs.
     // The MCP SDK requires a fresh transport per session (stateless transports
     // are single-use; session transports track state per session ID).
+    const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min idle timeout
     const sessions = new Map<string, StreamableHTTPServerTransport>();
+    const sessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+    function resetSessionTimer(sid: string): void {
+      clearTimeout(sessionTimers.get(sid));
+      sessionTimers.set(sid, setTimeout(() => {
+        const t = sessions.get(sid);
+        if (t) {
+          logger('MCP session expired: %s (idle %dm)', sid, SESSION_TTL_MS / 60000);
+          t.close().catch(() => {});
+          sessions.delete(sid);
+        }
+        sessionTimers.delete(sid);
+      }, SESSION_TTL_MS));
+    }
+
+    function closeAllSessions(): void {
+      for (const [sid, transport] of sessions) {
+        try { transport.close().catch(() => {}); } catch {}
+        clearTimeout(sessionTimers.get(sid));
+      }
+      sessions.clear();
+      sessionTimers.clear();
+    }
 
     const mountOnSamePort = MCP_PORT === 0 || MCP_PORT === PORT;
     if (mountOnSamePort && !httpListening) {
@@ -138,22 +163,33 @@ export async function main(): Promise<void> {
         const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
         if (sessionId && sessions.has(sessionId)) {
-          // Existing session — reuse transport
+          // Existing session — reuse transport, reset idle timer
           const transport = sessions.get(sessionId)!;
+          resetSessionTimer(sessionId);
           await transport.handleRequest(req, res, req.body);
-        } else if (!sessionId && isInitializeRequest(req.body)) {
+        } else if (sessionId) {
+          // Session ID provided but not found — 404 per MCP spec
+          res.status(404).json({
+            jsonrpc: '2.0',
+            error: { code: -32001, message: 'Session not found' },
+            id: null,
+          });
+        } else if (isInitializeRequest(req.body)) {
           // New session — create server + transport
           const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sid: string) => {
               sessions.set(sid, transport);
+              resetSessionTimer(sid);
               logger('MCP session created: %s (active: %d)', sid, sessions.size);
             },
           });
           transport.onclose = () => {
             const sid = transport.sessionId;
-            if (sid && sessions.has(sid)) {
+            if (sid) {
               sessions.delete(sid);
+              clearTimeout(sessionTimers.get(sid));
+              sessionTimers.delete(sid);
               logger('MCP session closed: %s (active: %d)', sid, sessions.size);
             }
           };
@@ -190,6 +226,7 @@ export async function main(): Promise<void> {
     }
 
     logger('MCP ready via Streamable HTTP (session mode)');
+    mcpCleanup = closeAllSessions;
   } else {
     // Local mode: stdio transport — single server instance
     const server = createMcpServer();
@@ -201,6 +238,7 @@ export async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = async () => {
     logger('Shutting down...');
+    mcpCleanup?.();
     try {
       await bridge.close();
     } catch (err) {
@@ -235,13 +273,14 @@ function registerTool(
     },
     async (params: Record<string, unknown>, extra: { authInfo?: { clientId?: string } }) => {
       let userId = extra?.authInfo?.clientId ?? '__local__';
-      // Fallback: if resolved userId has no connection, use first connected user
+      // Fallback: only in local/single-user mode — never cross user boundaries
       if (!bridge.isConnected(userId)) {
         const connected = bridge.getConnectedUserIds();
-        console.error(`[agent-browse] userId=${userId} not connected, connected users: ${JSON.stringify(connected)}`);
-        if (connected.length > 0) {
-          console.error(`[agent-browse] Falling back to ${connected[0]}`);
+        if (userId === '__local__' && connected.length > 0) {
+          logger('userId __local__ not connected, falling back to %s', connected[0]);
           userId = connected[0];
+        } else {
+          throw new Error(`No browser connection for user ${userId}`);
         }
       }
       const userMutex = bridge.getMutex(userId);
