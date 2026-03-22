@@ -102,6 +102,12 @@ export async function main(): Promise<void> {
 
     // Choose which Express app to mount on
     const mountOnSamePort = MCP_PORT === 0 || MCP_PORT === PORT;
+    if (mountOnSamePort && !httpListening) {
+      throw new Error(
+        `Cannot mount MCP on port ${PORT} — HTTP server failed to start. ` +
+        `Set AGENT_BROWSE_MCP_PORT to a different port, or fix the port conflict.`
+      );
+    }
     const mcpApp = mountOnSamePort ? httpApp : express();
     if (!mountOnSamePort) mcpApp.use(express.json());
 
