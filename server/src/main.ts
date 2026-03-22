@@ -1,12 +1,18 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+
+import express from 'express';
+import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 
 import { ExtensionBridge } from './ExtensionBridge.js';
+import type { BridgeLike } from './ExtensionBridge.js';
 import { McpResponse } from './McpResponse.js';
-import { Mutex } from './Mutex.js';
 import { createHttpServer } from './http-server.js';
 import { logger } from './logger.js';
 import { readFileSync } from 'node:fs';
+import { UserConfig } from './UserConfig.js';
 
 import type { AnyToolDef } from './ToolDefinition.js';
 
@@ -26,23 +32,26 @@ import * as cookieTools from './tools/cookies.js';
 import * as extractionTools from './tools/extraction.js';
 
 const PORT = parseInt(process.env.AGENT_BROWSE_PORT ?? '18800', 10);
+const MCP_PORT = parseInt(process.env.AGENT_BROWSE_MCP_PORT ?? '0', 10);
+const MCP_HOST = process.env.AGENT_BROWSE_MCP_HOST ?? '127.0.0.1';
 
 export async function main(): Promise<void> {
-  const bridge = new ExtensionBridge(PORT, 30000, SERVER_VERSION);
-  const toolMutex = new Mutex();
+  const userConfig = new UserConfig();
+  const bridge = new ExtensionBridge(PORT, 30000, SERVER_VERSION, userConfig);
 
   // Start HTTP server + WebSocket (attach WSS only after successful listen)
-  const httpServer = createHttpServer(bridge, SERVER_VERSION);
+  const { server: httpServer, app: httpApp } = createHttpServer(bridge, SERVER_VERSION);
 
   let httpListening = false;
   try {
     await new Promise<void>((resolve, reject) => {
       httpServer.once('error', reject);
-      httpServer.listen(PORT, '127.0.0.1', () => {
+      const HTTP_HOST = process.env.AGENT_BROWSE_HOST ?? '127.0.0.1';
+      httpServer.listen(PORT, HTTP_HOST, () => {
         httpServer.removeListener('error', reject);
         httpListening = true;
         bridge.start(httpServer);
-        logger('HTTP + WebSocket server listening on http://127.0.0.1:%d', PORT);
+        logger('HTTP + WebSocket server listening on http://%s:%d', HTTP_HOST, PORT);
         resolve();
       });
     });
@@ -77,15 +86,74 @@ export async function main(): Promise<void> {
   allTools.sort((a, b) => a.name.localeCompare(b.name));
 
   for (const tool of allTools) {
-    registerTool(server, tool, toolMutex, bridge);
+    registerTool(server, tool, bridge);
   }
 
   logger('Registered %d tools', allTools.length);
 
-  // Connect MCP via stdio
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  logger('MCP server connected via stdio');
+  // Connect MCP transport
+  let mcpHttpServer: http.Server | undefined;
+  const useRemoteMcp = MCP_PORT > 0 || process.env.AGENT_BROWSE_MCP_SAME_PORT === '1';
+
+  if (useRemoteMcp) {
+    // Remote mode: Streamable HTTP transport
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+    });
+
+    // Choose which Express app to mount on
+    const mountOnSamePort = MCP_PORT === 0 || MCP_PORT === PORT;
+    const mcpApp = mountOnSamePort ? httpApp : express();
+    if (!mountOnSamePort) mcpApp.use(express.json());
+
+    // Per-user auth middleware
+    if (userConfig.hasAuth) {
+      mcpApp.use('/mcp', (req, res, next) => {
+        const auth = req.headers.authorization;
+        if (!auth?.startsWith('Bearer ')) {
+          res.status(401).json({ error: 'Unauthorized' });
+          return;
+        }
+        const token = auth.slice(7);
+        const userId = userConfig.getUserIdByToken(token);
+        if (!userId) {
+          res.status(401).json({ error: 'Invalid token' });
+          return;
+        }
+        (req as unknown as Record<string, unknown>).auth = {
+          token,
+          clientId: userId,
+          scopes: [],
+        };
+        next();
+      });
+      logger('MCP auth enabled (%s)', userConfig.isMultiUser ? 'multi-user' : 'single-user');
+    }
+
+    mcpApp.all('/mcp', async (req, res) => {
+      await transport.handleRequest(req, res, req.body);
+    });
+
+    if (mountOnSamePort) {
+      logger('MCP mounted on same port %d at /mcp', PORT);
+    } else {
+      mcpHttpServer = http.createServer(mcpApp);
+      await new Promise<void>((resolve) => {
+        mcpHttpServer!.listen(MCP_PORT, MCP_HOST, () => {
+          logger('MCP Streamable HTTP listening on http://%s:%d/mcp', MCP_HOST, MCP_PORT);
+          resolve();
+        });
+      });
+    }
+
+    await server.connect(transport);
+    logger('MCP server connected via Streamable HTTP');
+  } else {
+    // Local mode: stdio transport
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    logger('MCP server connected via stdio');
+  }
 
   // Graceful shutdown
   const shutdown = async () => {
@@ -96,6 +164,7 @@ export async function main(): Promise<void> {
       logger('Error closing bridge: %O', err);
     }
     if (httpListening) httpServer.close();
+    if (mcpHttpServer) mcpHttpServer.close();
     process.exit(0);
   };
 
@@ -104,14 +173,15 @@ export async function main(): Promise<void> {
 }
 
 /**
- * Register a single tool on the MCP server with mutex serialization.
- * The mutex ensures only one tool handler runs at a time — critical
- * because the extension processes commands sequentially.
+ * Register a tool with per-user routing.
+ *
+ * The MCP SDK passes extra.authInfo.clientId (set by our auth middleware).
+ * We use it to resolve the user's extension connection and per-user mutex.
+ * Tools see a BridgeLike proxy — their code is unchanged.
  */
 function registerTool(
   server: McpServer,
   tool: AnyToolDef,
-  mutex: Mutex,
   bridge: ExtensionBridge,
 ): void {
   server.registerTool(
@@ -120,26 +190,31 @@ function registerTool(
       description: tool.description,
       inputSchema: tool.schema,
     },
-    async (params: Record<string, unknown>) => {
-      const guard = await mutex.acquire();
+    async (params: Record<string, unknown>, extra: { authInfo?: { clientId?: string } }) => {
+      const userId = extra?.authInfo?.clientId ?? '__local__';
+      const userMutex = bridge.getMutex(userId);
+      const guard = await userMutex.acquire();
+
       try {
-        logger('%s request: %O', tool.name, params);
+        logger('[%s] %s request: %O', userId, tool.name, params);
 
         const response = new McpResponse();
+        const userBridge: BridgeLike = bridge.forUser(userId);
+
         await tool.handler(
           { params },
           response,
-          { bridge },
+          { bridge: userBridge as unknown as ExtensionBridge },
         );
 
         const content = response.build(tool.name);
-        const warning = bridge.versionWarning;
+        const warning = userBridge.versionWarning;
         if (warning) {
           content.unshift({ type: 'text' as const, text: `⚠️ ${warning}` });
         }
         return { content };
       } catch (err) {
-        logger('%s error: %s', tool.name, (err as Error).message);
+        logger('[%s] %s error: %s', userId, tool.name, (err as Error).message);
         return {
           content: [{ type: 'text' as const, text: (err as Error).message }],
           isError: true,

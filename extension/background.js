@@ -13,10 +13,50 @@
  */
 
 // ============== Configuration ==============
-const RELAY_WS_URL = "ws://127.0.0.1:18800/ws";
+const DEFAULT_SERVER_URL = "ws://127.0.0.1:18800";
 const RECONNECT_INTERVAL = 5000;
 const KEEPALIVE_INTERVAL = 20000; // Keep service worker alive
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
+
+// Configurable relay settings — loaded from chrome.storage.sync
+let relayConfig = {
+  serverUrl: DEFAULT_SERVER_URL,
+  userId: "",
+  token: "",
+};
+
+function getWsUrl() {
+  const base = relayConfig.serverUrl.replace(/\/$/, '');
+  const params = new URLSearchParams();
+  if (relayConfig.userId) params.set('userId', relayConfig.userId);
+  if (relayConfig.token) params.set('token', relayConfig.token);
+  const qs = params.toString();
+  return `${base}/ws${qs ? '?' + qs : ''}`;
+}
+
+// Load config on startup and watch for changes
+chrome.storage.sync.get(['serverUrl', 'userId', 'token'], (result) => {
+  if (result.serverUrl) relayConfig.serverUrl = result.serverUrl;
+  if (result.userId) relayConfig.userId = result.userId;
+  if (result.token) relayConfig.token = result.token;
+  console.log("[Relay] Config loaded:", relayConfig.serverUrl, "userId:", relayConfig.userId || "(local)");
+  connectToRelay();
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'sync') return;
+  let changed = false;
+  if (changes.serverUrl?.newValue) { relayConfig.serverUrl = changes.serverUrl.newValue; changed = true; }
+  if (changes.userId?.newValue !== undefined) { relayConfig.userId = changes.userId.newValue; changed = true; }
+  if (changes.token?.newValue !== undefined) { relayConfig.token = changes.token.newValue; changed = true; }
+  if (changed) {
+    console.log("[Relay] Config changed, reconnecting:", relayConfig.serverUrl, "userId:", relayConfig.userId || "(local)");
+    if (state.wsConnection) {
+      state.wsConnection.close();
+    }
+    setTimeout(connectToRelay, 500);
+  }
+});
 
 // ============== State ==============
 const state = {
@@ -61,7 +101,7 @@ function connectToRelay() {
   console.log("[Relay] Connecting to relay server...");
 
   try {
-    state.wsConnection = new WebSocket(RELAY_WS_URL);
+    state.wsConnection = new WebSocket(getWsUrl());
 
     state.wsConnection.onopen = () => {
       console.log("[Relay] Connected to relay server");
@@ -69,6 +109,7 @@ function connectToRelay() {
       sendToRelay({
         type: "hello",
         version: EXTENSION_VERSION,
+        userId: relayConfig.userId || undefined,
         attachedTabs: Array.from(state.attachedTabs.keys())
       });
     };
@@ -744,6 +785,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       const { action, tabId } = message;
 
+      if (message.type === "status") {
+        // Options page status query
+        sendResponse({
+          connected: state.wsConnected,
+          userId: relayConfig.userId,
+          serverUrl: relayConfig.serverUrl,
+        });
+        return;
+      }
+
       if (action === "status") {
         sendResponse({
           attached: state.attachedTabs.has(tabId),
@@ -780,4 +831,4 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // ============== Initialization ==============
 
 console.log("[Relay] Background service worker started");
-connectToRelay();
+// connectToRelay() is called after config loads from chrome.storage.sync (see Configuration section)
