@@ -6,8 +6,7 @@ import express from 'express';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 
-import { ExtensionBridge } from './ExtensionBridge.js';
-import type { BridgeLike } from './ExtensionBridge.js';
+import { ExtensionBridge, type BridgeLike } from './ExtensionBridge.js';
 import { McpResponse } from './McpResponse.js';
 import { createHttpServer } from './http-server.js';
 import { logger } from './logger.js';
@@ -96,9 +95,9 @@ export async function main(): Promise<void> {
   const useRemoteMcp = MCP_PORT > 0 || process.env.AGENT_BROWSE_MCP_SAME_PORT === '1';
 
   if (useRemoteMcp) {
-    // Remote mode: Streamable HTTP transport
+    // Remote mode: Streamable HTTP transport (stateless — auth is external)
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
+      sessionIdGenerator: undefined,
     });
 
     // Choose which Express app to mount on
@@ -131,15 +130,24 @@ export async function main(): Promise<void> {
     }
 
     mcpApp.all('/mcp', async (req, res) => {
-      await transport.handleRequest(req, res, req.body);
+      try {
+        await transport.handleRequest(req, res, req.body);
+      } catch (err) {
+        logger('MCP transport error: %O', err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Internal MCP transport error' });
+        }
+      }
     });
 
     if (mountOnSamePort) {
       logger('MCP mounted on same port %d at /mcp', PORT);
     } else {
       mcpHttpServer = http.createServer(mcpApp);
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
+        mcpHttpServer!.once('error', reject);
         mcpHttpServer!.listen(MCP_PORT, MCP_HOST, () => {
+          mcpHttpServer!.removeListener('error', reject);
           logger('MCP Streamable HTTP listening on http://%s:%d/mcp', MCP_HOST, MCP_PORT);
           resolve();
         });
@@ -204,7 +212,7 @@ function registerTool(
         await tool.handler(
           { params },
           response,
-          { bridge: userBridge as unknown as ExtensionBridge },
+          { bridge: userBridge },
         );
 
         const content = response.build(tool.name);
@@ -214,7 +222,7 @@ function registerTool(
         }
         return { content };
       } catch (err) {
-        logger('[%s] %s error: %s', userId, tool.name, (err as Error).message);
+        logger('[%s] %s error: %O', userId, tool.name, err);
         return {
           content: [{ type: 'text' as const, text: (err as Error).message }],
           isError: true,

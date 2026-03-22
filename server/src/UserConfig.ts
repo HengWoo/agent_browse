@@ -2,7 +2,6 @@ import { logger } from './logger.js';
 
 interface UserEntry {
   token: string;
-  name?: string;
 }
 
 /**
@@ -27,14 +26,26 @@ export class UserConfig {
         const parsed = JSON.parse(usersJson) as Record<string, string | UserEntry>;
         for (const [userId, value] of Object.entries(parsed)) {
           const token = typeof value === 'string' ? value : value.token;
+          if (!token) {
+            throw new Error(`User "${userId}" has no token defined`);
+          }
+          if (this.#tokenToUser.has(token)) {
+            throw new Error(`Duplicate token for users: "${this.#tokenToUser.get(token)}" and "${userId}"`);
+          }
           this.#tokenToUser.set(token, userId);
           this.#userToToken.set(userId, token);
         }
+        if (this.#tokenToUser.size === 0) {
+          throw new Error('AGENT_BROWSE_USERS parsed but contains no user entries');
+        }
         this.#isMultiUser = true;
         logger('Multi-user mode: %d users configured', this.#tokenToUser.size);
-      } catch {
-        logger('ERROR: Failed to parse AGENT_BROWSE_USERS — falling back to single-user');
-        this.#isMultiUser = false;
+      } catch (err) {
+        // Fail hard — do not silently fall back to no-auth
+        throw new Error(
+          `Fatal: AGENT_BROWSE_USERS is set but invalid: ${(err as Error).message}. ` +
+          `Fix the JSON or remove the variable to run without auth.`
+        );
       }
     } else {
       this.#isMultiUser = false;

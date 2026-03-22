@@ -110,6 +110,8 @@ class UserConnection {
       clearTimeout(pending.timer);
       pending.resolve(msg as unknown as BridgeResponse);
       logger('[%s] Response for %s received', this.userId, id);
+    } else if (id) {
+      logger('[%s] Response for %s arrived but no pending request (timed out?)', this.userId, id);
     }
   }
 
@@ -177,53 +179,101 @@ export class ExtensionBridge {
     this.#wss = new WebSocketServer({ server, path: '/ws' });
 
     this.#wss.on('connection', (ws, req) => {
-      // Parse userId and token from query params
+      // Parse userId from query params (token moved to hello handshake for security)
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       let userId = url.searchParams.get('userId') ?? '__local__';
-      const token = url.searchParams.get('token') ?? '';
+      let authenticated = !this.#userConfig?.hasAuth; // no auth = auto-accept
 
-      // Authenticate extension connection
-      if (this.#userConfig?.hasAuth && !this.#userConfig.isValidExtensionAuth(userId, token)) {
-        logger('Rejected extension connection: invalid auth for userId=%s', userId);
-        ws.close(4001, 'Authentication failed');
-        return;
-      }
-
-      logger('[%s] Extension connected', userId);
-
-      // Get or create user connection
-      let conn = this.#connections.get(userId);
-      if (!conn) {
-        conn = new UserConnection(userId);
-        this.#connections.set(userId, conn);
-      }
-
-      // Replace existing connection for this user
-      if (conn.ws && conn.ws.readyState === WebSocket.OPEN) {
-        logger('[%s] Replacing existing extension connection', userId);
-        conn.ws.close();
-      }
-      conn.ws = ws;
-      conn.version = null;
+      // Hold the WebSocket in a pending state until hello authenticates
+      const pendingConn = { ws, userId, authenticated };
 
       ws.on('message', (raw) => {
+        let msg: Record<string, unknown>;
         try {
-          const msg = JSON.parse(raw.toString());
-          conn!.handleMessage(msg, this.#serverVersion);
+          msg = JSON.parse(raw.toString());
         } catch (err) {
-          logger('[%s] Failed to parse extension message: %O', userId, err);
+          logger('[%s] Failed to parse extension message: %O', pendingConn.userId, err);
+          return;
+        }
+
+        // Handle hello message for auth (before full registration)
+        if (msg.type === 'hello' && !pendingConn.authenticated) {
+          const helloUserId = (msg.userId as string) || pendingConn.userId;
+          const helloToken = (msg.token as string) || '';
+          pendingConn.userId = helloUserId;
+
+          if (this.#userConfig?.hasAuth && !this.#userConfig.isValidExtensionAuth(helloUserId, helloToken)) {
+            logger('Rejected extension: invalid auth for userId=%s', helloUserId);
+            ws.close(4001, 'Authentication failed');
+            return;
+          }
+
+          pendingConn.authenticated = true;
+          userId = helloUserId;
+
+          // Now register the connection
+          let conn = this.#connections.get(userId);
+          if (!conn) {
+            conn = new UserConnection(userId);
+            this.#connections.set(userId, conn);
+          }
+          if (conn.ws && conn.ws.readyState === WebSocket.OPEN) {
+            logger('[%s] Replacing existing extension connection', userId);
+            conn.ws.close();
+          }
+          conn.ws = ws;
+          conn.version = null;
+          conn.handleMessage(msg, this.#serverVersion);
+          logger('[%s] Extension connected and authenticated', userId);
+          return;
+        }
+
+        // For no-auth mode, register on first message if not yet done
+        if (!pendingConn.authenticated) return;
+
+        const conn = this.#connections.get(pendingConn.userId);
+        if (!conn) return;
+
+        try {
+          conn.handleMessage(msg, this.#serverVersion);
+        } catch (err) {
+          logger('[%s] UNEXPECTED error in handleMessage: %O', pendingConn.userId, err);
+          const id = msg.id as string | undefined;
+          if (id && conn.pendingRequests.has(id)) {
+            const pending = conn.pendingRequests.get(id)!;
+            conn.pendingRequests.delete(id);
+            clearTimeout(pending.timer);
+            pending.reject(new Error(`Internal error handling response: ${(err as Error).message}`));
+          }
         }
       });
 
       ws.on('close', () => {
-        if (conn!.ws === ws) {
-          conn!.handleDisconnect();
+        const conn = this.#connections.get(pendingConn.userId);
+        if (conn?.ws === ws) {
+          conn.handleDisconnect();
         }
       });
 
       ws.on('error', (err) => {
-        logger('[%s] Extension WebSocket error: %O', userId, err);
+        logger('[%s] Extension WebSocket error: %O', pendingConn.userId, err);
       });
+
+      // For no-auth mode, register immediately
+      if (authenticated) {
+        let conn = this.#connections.get(userId);
+        if (!conn) {
+          conn = new UserConnection(userId);
+          this.#connections.set(userId, conn);
+        }
+        if (conn.ws && conn.ws.readyState === WebSocket.OPEN) {
+          logger('[%s] Replacing existing extension connection', userId);
+          conn.ws.close();
+        }
+        conn.ws = ws;
+        conn.version = null;
+        logger('[%s] Extension connected (no auth)', userId);
+      }
     });
 
     logger('WebSocket server listening on path /ws');

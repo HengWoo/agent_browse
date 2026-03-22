@@ -1,13 +1,13 @@
 import { z } from 'zod';
 import type { McpResponse } from './McpResponse.js';
-import type { ExtensionBridge } from './ExtensionBridge.js';
+import type { BridgeLike } from './ExtensionBridge.js';
 
 export interface ToolRequest<T> {
   params: T;
 }
 
 export interface ToolContext {
-  bridge: ExtensionBridge;
+  bridge: BridgeLike;
 }
 
 export interface ToolDef<T extends z.ZodRawShape = z.ZodRawShape> {

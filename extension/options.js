@@ -6,6 +6,9 @@ const statusDiv = document.getElementById('status');
 
 // Load saved settings
 chrome.storage.sync.get(['serverUrl', 'userId', 'token'], (result) => {
+  if (chrome.runtime.lastError) {
+    console.error('Failed to load settings:', chrome.runtime.lastError.message);
+  }
   serverUrlInput.value = result.serverUrl || '';
   userIdInput.value = result.userId || '';
   tokenInput.value = result.token || '';
@@ -19,9 +22,13 @@ saveButton.addEventListener('click', () => {
     token: tokenInput.value.trim(),
   };
   chrome.storage.sync.set(config, () => {
+    if (chrome.runtime.lastError) {
+      statusDiv.textContent = 'Failed to save: ' + chrome.runtime.lastError.message;
+      statusDiv.className = 'status disconnected';
+      return;
+    }
     statusDiv.textContent = 'Settings saved. Extension will reconnect...';
     statusDiv.className = 'status saved';
-    // Check connection after a brief delay
     setTimeout(checkConnection, 2000);
   });
 });
