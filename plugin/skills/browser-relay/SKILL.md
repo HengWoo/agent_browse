@@ -1,134 +1,101 @@
 ---
 name: browser-relay
-description: This skill should be used when the user asks to "browse", "automate browser", "control chrome", "real browser", "anti-bot", "relay server", "agent browse", or wants to interact with their actual Chrome browser sessions. Provides the API reference, decision matrix, and workflow patterns for the agent_browse relay system.
-version: 1.0.0
+description: This skill should be used when the user asks to "browse", "automate browser", "control chrome", "real browser", "anti-bot", "open website", "scrape page", "take screenshot", "click button", or wants to interact with their actual Chrome browser via the agent-browse relay. Provides the tool reference, decision matrix, and workflow patterns for remote browser automation.
+version: 2.0.0
 ---
 
-# Browser Relay — Real Chrome Automation
+# Browser Relay — Real Chrome Automation via MCP
 
-Control the user's actual Chrome browser through the agent_browse relay system. Unlike Playwright or chrome-devtools-mcp, this uses the real browser with logged-in sessions and natural fingerprints.
+Control the user's actual Chrome browser through the agent-browse relay server. The Chrome extension bridges Claude Code to the user's real browser — with logged-in sessions, natural fingerprints, and anti-bot bypass.
 
-## When to Use This vs chrome-devtools-mcp
+## When to Use This vs Other Browser Tools
 
-| Scenario | Use agent_browse | Use chrome-devtools-mcp |
-|----------|:---:|:---:|
-| Anti-bot protected sites (Cloudflare, etc.) | YES | No |
-| Pages requiring login sessions | YES | No |
-| Sites with device fingerprinting | YES | No |
-| Quick prototyping / clean browser | No | YES |
-| Automated testing pipelines | No | YES |
-| Screenshot of arbitrary URL | Either | YES |
+| Scenario | Use agent-browse | Use chrome-devtools-mcp | Use Playwright |
+|----------|:---:|:---:|:---:|
+| Anti-bot protected sites (Cloudflare, etc.) | YES | No | No |
+| Pages requiring login sessions | YES | No | No |
+| Sites with device fingerprinting | YES | No | No |
+| User wants to watch automation live | YES | No | No |
+| Quick prototyping / clean browser | Either | YES | YES |
+| Automated testing pipelines | No | YES | YES |
 
-## Relay Architecture
+## Architecture
 
 ```
-Claude Code ──HTTP──► Relay Server (127.0.0.1:18800) ◄──WebSocket──► Chrome Extension ──debugger API──► Tab
+Claude Code → MCP (HTTPS) → Relay Server → WebSocket → Chrome Extension → Real Browser
 ```
 
-### Components
-- **relay_server.py**: Python aiohttp server bridging HTTP ↔ WebSocket
-- **extension/**: Chrome Manifest V3 extension using `chrome.debugger` API
-- **browse-cli.sh**: CLI wrapper for curl commands
+The user's Chrome extension connects to the relay server. Claude Code sends MCP tool calls that route to the user's specific extension via per-user auth tokens.
 
-## API Reference
+## Prerequisites
 
-### Server Info
-```
-GET / → {name, version, extension_connected, endpoints}
-```
+Before using browser tools, the user must have:
+1. Chrome extension installed and configured (server URL + userId + token in extension options)
+2. `AGENT_BROWSE_TOKEN` environment variable set (their auth token)
+3. Extension showing "Connected" status
+
+Check connection status first:
+- Call `tabs_list` — if it returns tabs, the extension is connected
+- If it throws "Extension not connected", the user needs to set up the extension
+
+## MCP Tools Reference
+
+All tools are available as `mcp__agent-browse__<tool_name>`.
 
 ### Tab Management
-```
-GET /tabs → {tabs: [{id, url, title, attached}...]}
-POST /attach {tabId} → {success: true}
-POST /detach {tabId} → {success: true}
-```
+- `tabs_list` — List all open browser tabs with id, url, title
+- `tab_attach` — Attach debugger to a tab (required before most actions)
+- `tab_detach` — Detach debugger from a tab
 
-**Important**: You must attach to a tab before sending any commands to it.
+### Navigation
+- `navigate` — Navigate a tab to a URL
 
-### Navigation & Content
-```
-POST /navigate {tabId, url} → {success: true}
-POST /pageInfo {tabId} → {url, title, text}
-```
+### Input
+- `click` — Click at coordinates (x, y)
+- `click_selector` — Click element by CSS selector (auto-finds coordinates)
+- `click_text` — Click element by visible text content
+- `type` — Type text into focused element
+- `press_key` — Press a key or key combo (e.g., "Enter", "Control+A")
 
-### User Interaction
-```
-POST /click {tabId, x, y} → {success: true}
-POST /type {tabId, text} → {success: true}
-POST /evaluate {tabId, expression} → {result: ...}
-```
+### Inspection
+- `screenshot` — Capture visible page as PNG
+- `snapshot` — Get accessibility tree (structured DOM) with element IDs (e1, e2, ...)
+- `evaluate` — Execute JavaScript in page context
 
-### Screenshots
-```
-POST /screenshot {tabId} → {data: "base64..."}
-```
+### Network
+- `network_enable` — Start capturing network requests (call BEFORE navigating)
+- `network_requests` — List captured network requests (with optional URL filter)
+- `network_request_detail` — Get response body of a specific request
+
+### Cookies & Storage
+- `cookies_get` — Get cookies for a URL
+- `cookies_set` — Set a cookie
+- `storage_get` — Read localStorage (key or all)
+- `storage_set` — Write to localStorage
+
+### Content Extraction
+- `extract_table` — Extract table data from page by CSS selector
+- `extract_links` — Extract all links from page
+- `wait_for` — Wait for selector, text, or network idle
 
 ### Raw CDP
-```
-POST /cdp {tabId, method, params} → {result: ...}
-```
+- `cdp_raw` — Send any Chrome DevTools Protocol command directly
 
-Any Chrome DevTools Protocol method can be called. Common examples:
-- `DOM.getDocument` — get DOM tree
-- `Runtime.evaluate` — evaluate JS (more control than /evaluate)
-- `Network.enable` — start network monitoring
-- `Page.captureScreenshot` — screenshot with format options
+## Standard Workflow
 
-## Common Workflows
+1. **List tabs** → `tabs_list` to find the tab to work with
+2. **Attach** → `tab_attach` with the tab ID
+3. **Navigate** → `navigate` to the target URL
+4. **Inspect** → `snapshot` to see page structure, or `screenshot` for visual
+5. **Act** → `click_selector`, `type`, `press_key` to interact
+6. **Extract** → `evaluate` for data, `extract_table` for tables, `screenshot` for visual proof
+7. **Detach** → `tab_detach` when done
 
-### 1. Basic Page Automation
-```bash
-# Setup
-browse-cli.sh tabs                     # Find target tab
-browse-cli.sh attach <tabId>           # Attach debugger
+## Tips
 
-# Work
-browse-cli.sh navigate <tabId> <url>   # Go to page
-browse-cli.sh screenshot <tabId>       # Verify state
-browse-cli.sh click <tabId> 100 200    # Click element
-browse-cli.sh type <tabId> "hello"     # Type text
-
-# Cleanup
-browse-cli.sh detach <tabId>           # Release
-```
-
-### 2. Finding Elements for Click
-When you need to click a specific element, use JavaScript to find its coordinates:
-
-```bash
-browse-cli.sh evaluate <tabId> "
-  const el = document.querySelector('button.submit');
-  if (el) {
-    const rect = el.getBoundingClientRect();
-    JSON.stringify({x: rect.x + rect.width/2, y: rect.y + rect.height/2});
-  } else {
-    JSON.stringify({error: 'not found'});
-  }
-"
-```
-
-Then use the returned x,y with the click command.
-
-### 3. Handling Shadow DOM
-See `references/shadow-dom-patterns.md` for patterns to interact with shadow DOM elements.
-
-### 4. Data Extraction
-```bash
-browse-cli.sh evaluate <tabId> "
-  JSON.stringify(
-    Array.from(document.querySelectorAll('table tr'))
-      .map(r => Array.from(r.cells).map(c => c.textContent.trim()))
-  )
-"
-```
-
-## Troubleshooting
-
-| Error | Cause | Fix |
-|-------|-------|-----|
-| Extension not connected | Relay has no WebSocket client | Load extension, click icon |
-| Tab not attached | Debugger not attached to tab | Run `attach <tabId>` first |
-| Request timeout | Extension disconnected | Check extension, restart relay |
-| Debugger detached | DevTools opened on same tab | Close DevTools, re-attach |
-| Tab closed | User closed the tab | List tabs, pick new target |
+- Always call `tab_attach` before other actions on a tab
+- Use `snapshot` over `screenshot` for structured interaction — it gives element IDs you can reference
+- Use `click_selector` or `click_text` over raw `click` (x, y) — more reliable
+- Call `network_enable` BEFORE navigating if you need to capture XHR/fetch requests
+- The `wait_for` tool is essential after navigation — pages may still be loading
+- For complex pages, combine `snapshot` (structure) + `screenshot` (visual) for best understanding
