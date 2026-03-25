@@ -40,15 +40,7 @@ Token is provided by your admin.
 
 ### 3. Install the Chrome Extension
 
-**Download:** Click **Code → Download ZIP** at the top of this page, then extract the `extension/` folder.
-
-Or clone:
-
-```bash
-git clone https://github.com/HengWoo/agent_browse.git
-```
-
-Then load it in Chrome:
+**[Download Chrome Extension](https://github.com/HengWoo/agent_browse/releases/download/v0.2.0/agent-browse-extension.zip)** — unzip to get the `extension/` folder, then load it in Chrome:
 
 1. Open `chrome://extensions/`
 2. Enable **Developer mode** (top right)
@@ -160,15 +152,7 @@ export AGENT_BROWSE_TOKEN="你的令牌"
 
 ### 3. 安装 Chrome 扩展
 
-**下载：** 点击本页面顶部的 **Code → Download ZIP**，然后解压出 `extension/` 文件夹。
-
-或者克隆仓库：
-
-```bash
-git clone https://github.com/HengWoo/agent_browse.git
-```
-
-然后在 Chrome 中加载：
+**[下载 Chrome 扩展](https://github.com/HengWoo/agent_browse/releases/download/v0.2.0/agent-browse-extension.zip)** — 解压后得到 `extension/` 文件夹，然后在 Chrome 中加载：
 
 1. 打开 `chrome://extensions/`
 2. 开启右上角**开发者模式**
