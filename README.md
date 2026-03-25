@@ -1,148 +1,208 @@
-# Browser Relay for Claude Code
+# agent-browse — Real Chrome Browser Automation for Claude Code
 
-A custom Chrome extension + Python relay server that allows Claude Code to control browser tabs via HTTP API.
+Control your real Chrome browser remotely via Claude Code. Uses a Chrome extension relay for anti-bot bypass, login session reuse, and real browser fingerprints.
+
+[中文说明](#agent-browse--通过-claude-code-远程控制真实-chrome-浏览器)
 
 ## Architecture
 
 ```
-Claude Code ──HTTP──► Relay Server ◄──WebSocket──► Chrome Extension ──debugger API──► Browser Tab
+Claude Code → MCP (HTTPS) → Relay Server → WebSocket → Chrome Extension → Your Browser
 ```
-
-**How it works:**
-1. Chrome extension connects to relay server via WebSocket
-2. Claude Code sends HTTP requests to relay server
-3. Relay forwards commands to extension via WebSocket
-4. Extension executes commands using Chrome's `debugger` API (CDP)
-5. Results flow back through the same path
 
 ## Why This Approach?
 
-- **Uses real Chrome** - No detectable automation frameworks
-- **Persistent sessions** - Your logged-in sessions work naturally
-- **Anti-bot bypass** - Sites see a real browser, not Playwright/Puppeteer
-- **Full CDP access** - Any Chrome DevTools Protocol command available
+- **Uses your real Chrome** — not a detectable automation browser
+- **Persistent sessions** — your logged-in sessions work naturally
+- **Anti-bot bypass** — sites see a real browser, not Playwright/Puppeteer
+- **Multi-user** — each user gets their own token and browser connection
+- **23 MCP tools** — tabs, navigation, clicks, screenshots, network capture, and more
 
-## Setup
+## Quick Start
 
-### 1. Install the Chrome Extension
+### 1. Install the Claude Code Plugin
 
-1. Open Chrome and go to `chrome://extensions/`
-2. Enable "Developer mode" (toggle in top right)
-3. Click "Load unpacked"
-4. Select the `extension/` folder from this repository
-5. The extension icon should appear in your toolbar
+> **脆脆用户可跳过此步** — 插件已预装。
 
-### 2. Start the Relay Server
-
-```bash
-uv run python relay_server.py
+```
+/install-plugin smarticeAI/smartice_plugins agent-browse
 ```
 
-The server starts at `http://127.0.0.1:18800`
+### 2. Set Your Auth Token
 
-### 3. Connect Extension to Server
-
-The extension auto-connects when the relay server is running. Check the extension popup for connection status.
-
-## Usage
-
-### Attach to a Tab
-
-First, click the extension icon on any tab and click "Attach to Tab". This enables debugger control.
-
-Or via API:
-```bash
-# List all tabs
-curl http://127.0.0.1:18800/tabs
-
-# Attach to a specific tab
-curl -X POST http://127.0.0.1:18800/attach \
-  -H "Content-Type: application/json" \
-  -d '{"tabId": 123456789}'
-```
-
-### Available Endpoints
-
-| Endpoint | Method | Body | Description |
-|----------|--------|------|-------------|
-| `/` | GET | - | Server info |
-| `/tabs` | GET | - | List all browser tabs |
-| `/attach` | POST | `{tabId}` | Attach debugger to tab |
-| `/detach` | POST | `{tabId}` | Detach from tab |
-| `/navigate` | POST | `{tabId, url}` | Navigate to URL |
-| `/click` | POST | `{tabId, x, y}` | Click at coordinates |
-| `/type` | POST | `{tabId, text}` | Type text |
-| `/evaluate` | POST | `{tabId, expression}` | Execute JavaScript |
-| `/screenshot` | POST | `{tabId}` | Capture screenshot (base64) |
-| `/pageInfo` | POST | `{tabId}` | Get URL, title, body text |
-| `/cdp` | POST | `{tabId, method, params}` | Raw CDP command |
-
-### Example: Navigate and Screenshot
+Add to your shell profile (`.zshrc`, `.bashrc`, etc.):
 
 ```bash
-# Navigate
-curl -X POST http://127.0.0.1:18800/navigate \
-  -H "Content-Type: application/json" \
-  -d '{"tabId": 123456789, "url": "https://example.com"}'
-
-# Take screenshot
-curl -X POST http://127.0.0.1:18800/screenshot \
-  -H "Content-Type: application/json" \
-  -d '{"tabId": 123456789}'
+export AGENT_BROWSE_TOKEN="your-token-here"
 ```
 
-### Example: Click by Finding Element
+Token is provided by your admin.
+
+### 3. Install the Chrome Extension
+
+**Download:** Click **Code → Download ZIP** at the top of this page, then extract the `extension/` folder.
+
+Or clone:
 
 ```bash
-# First, find element coordinates with JavaScript
-curl -X POST http://127.0.0.1:18800/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tabId": 123456789,
-    "expression": "(() => { const el = document.querySelector(\"button.submit\"); const rect = el.getBoundingClientRect(); return {x: rect.x + rect.width/2, y: rect.y + rect.height/2}; })()"
-  }'
-
-# Then click at those coordinates
-curl -X POST http://127.0.0.1:18800/click \
-  -H "Content-Type: application/json" \
-  -d '{"tabId": 123456789, "x": 500, "y": 300}'
+git clone https://github.com/HengWoo/agent_browse.git
 ```
 
-## Files
+Then load it in Chrome:
+
+1. Open `chrome://extensions/`
+2. Enable **Developer mode** (top right)
+3. Click **Load unpacked** → select the `extension/` folder
+4. Click the extension icon → **Options**
+5. Set:
+   - **Server URL**: `wss://browse.clembot.uk`
+   - **User ID**: your assigned user ID
+   - **Token**: your auth token
+6. Click **Save & Reconnect**
+7. Status should show **Connected**
+
+### 4. Use It
+
+Ask Claude Code to browse — it will use the MCP tools automatically:
+
+> "Open pos.meituan.com and check today's sales report"
+
+Or use the `browser-automation` agent for complex multi-step tasks.
+
+## Available MCP Tools (23)
+
+| Category | Tools |
+|----------|-------|
+| Tabs | `tabs_list`, `tab_attach`, `tab_detach` |
+| Navigation | `navigate` |
+| Input | `click`, `click_selector`, `click_text`, `type`, `press_key` |
+| Inspection | `screenshot`, `snapshot`, `evaluate` |
+| Network | `network_enable`, `network_requests`, `network_request_detail` |
+| Cookies | `cookies_get`, `cookies_set` |
+| Storage | `storage_get`, `storage_set` |
+| Extraction | `extract_table`, `extract_links`, `wait_for` |
+| Raw | `cdp_raw` |
+
+## Project Structure
 
 ```
 agent_browse/
-├── relay_server.py          # Python WebSocket/HTTP relay
-├── extension/
-│   ├── manifest.json        # Extension configuration
-│   ├── background.js        # Service worker (WebSocket + CDP)
-│   ├── popup.html           # Extension popup UI
-│   ├── popup.js             # Popup logic
-│   └── icons/               # Extension icons
-└── README.md
+├── server/          # Node.js MCP relay server (TypeScript)
+├── extension/       # Chrome extension (background.js + options page)
+├── plugin/          # Claude Code plugin (MCP config + agent + skill)
+└── deploy/          # Dockerfile, docker-compose, systemd templates
 ```
 
-## Troubleshooting
+## Server Deployment
 
-**Extension not connecting:**
-- Make sure relay server is running (`uv run python relay_server.py`)
-- Check browser console for WebSocket errors
-- Extension auto-reconnects every 5 seconds
+The relay server runs on any Linux VPS. Two options:
 
-**"Tab not attached" error:**
-- Click extension icon and click "Attach to Tab" first
-- Or use `/attach` API endpoint
+**systemd (bare Node.js):**
+```bash
+cd server && npm install && npm run build
+# Copy to /opt/agent-browse/server, create systemd service
+# Set AGENT_BROWSE_MCP_SAME_PORT=1 and AGENT_BROWSE_USERS
+```
 
-**Debugger detaches unexpectedly:**
-- Chrome detaches debugger when DevTools is opened
-- Close DevTools before using relay
+**Docker:**
+```bash
+cd deploy && docker compose up -d
+```
 
-## Comparison with Other Tools
+See `deploy/` for Dockerfile, docker-compose, and env configuration.
 
-| Feature | Browser Relay | Playwright/Puppeteer | Chrome DevTools MCP |
-|---------|--------------|---------------------|---------------------|
+## Comparison
+
+| Feature | agent-browse | Playwright/Puppeteer | Chrome DevTools MCP |
+|---------|-------------|---------------------|---------------------|
 | Uses real Chrome | ✅ | ❌ (embedded) | ⚠️ (separate profile) |
 | Existing sessions | ✅ | ❌ | ❌ |
 | Anti-bot bypass | ✅ | ❌ | ⚠️ |
-| Multi-session | ✅ | ⚠️ | ❌ |
+| Multi-user | ✅ | ⚠️ | ❌ |
+| Remote browser | ✅ | ⚠️ | ❌ |
 | Full CDP access | ✅ | ✅ | ✅ |
+
+## License
+
+MIT
+
+---
+
+# agent-browse — 通过 Claude Code 远程控制真实 Chrome 浏览器
+
+通过 Claude Code 远程控制你的真实 Chrome 浏览器。使用 Chrome 扩展中继，绕过反爬虫检测，复用已登录会话，保持真实浏览器指纹。
+
+## 架构
+
+```
+Claude Code → MCP (HTTPS) → 中继服务器 → WebSocket → Chrome 扩展 → 你的浏览器
+```
+
+## 快速开始
+
+### 1. 安装 Claude Code 插件
+
+> **脆脆用户可跳过此步** — 插件已预装。
+
+```
+/install-plugin smarticeAI/smartice_plugins agent-browse
+```
+
+### 2. 设置认证令牌
+
+在 shell 配置文件（`.zshrc`、`.bashrc` 等）中添加：
+
+```bash
+export AGENT_BROWSE_TOKEN="你的令牌"
+```
+
+令牌由管理员提供。
+
+### 3. 安装 Chrome 扩展
+
+**下载：** 点击本页面顶部的 **Code → Download ZIP**，然后解压出 `extension/` 文件夹。
+
+或者克隆仓库：
+
+```bash
+git clone https://github.com/HengWoo/agent_browse.git
+```
+
+然后在 Chrome 中加载：
+
+1. 打开 `chrome://extensions/`
+2. 开启右上角**开发者模式**
+3. 点击**加载已解压的扩展程序** → 选择 `extension/` 文件夹
+4. 点击扩展图标 → **选项**
+5. 设置：
+   - **服务器地址**: `wss://browse.clembot.uk`
+   - **用户 ID**: 管理员分配的用户 ID
+   - **令牌**: 你的认证令牌
+6. 点击**保存并重连**
+7. 状态应显示**已连接**
+
+### 4. 开始使用
+
+直接让 Claude Code 操作浏览器，它会自动调用 MCP 工具：
+
+> "打开 pos.meituan.com 查看今天的销售报表"
+
+也可以使用 `browser-automation` agent 执行复杂的多步骤任务。
+
+## 可用 MCP 工具（23 个）
+
+| 类别 | 工具 |
+|------|------|
+| 标签页 | `tabs_list`, `tab_attach`, `tab_detach` |
+| 导航 | `navigate` |
+| 输入 | `click`, `click_selector`, `click_text`, `type`, `press_key` |
+| 检查 | `screenshot`, `snapshot`, `evaluate` |
+| 网络 | `network_enable`, `network_requests`, `network_request_detail` |
+| Cookie | `cookies_get`, `cookies_set` |
+| 存储 | `storage_get`, `storage_set` |
+| 数据提取 | `extract_table`, `extract_links`, `wait_for` |
+| 原始 CDP | `cdp_raw` |
+
+## 许可证
+
+MIT
