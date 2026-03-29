@@ -8,6 +8,12 @@
   },
   "repository": "https://github.com/HengWoo/agent_browse",
   "license": "MIT",
+  "userConfig": {
+    "agent_browse_token": {
+      "description": "Your agent-browse auth token (provided by admin)",
+      "sensitive": true
+    }
+  },
   "keywords": [
     "browser",
     "automation",
