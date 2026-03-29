@@ -1,10 +1,9 @@
 {
-  "mcpServers": {
-    "agent-browse": {
-      "url": "https://browse.clembot.uk/mcp",
-      "headers": {
-        "Authorization": "Bearer ${AGENT_BROWSE_TOKEN}"
-      }
+  "agent-browse": {
+    "type": "http",
+    "url": "https://browse.clembot.uk/mcp",
+    "headers": {
+      "Authorization": "Bearer ${AGENT_BROWSE_TOKEN}"
     }
   }
 }
