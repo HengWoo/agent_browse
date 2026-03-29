@@ -3,7 +3,7 @@
     "agent-browse": {
       "url": "https://browse.clembot.uk/mcp",
       "headers": {
-        "Authorization": "Bearer ${user_config.agent_browse_token}"
+        "Authorization": "Bearer ${AGENT_BROWSE_TOKEN}"
       }
     }
   }
