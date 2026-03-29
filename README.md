@@ -28,11 +28,15 @@ Claude Code → MCP (HTTPS) → Relay Server → WebSocket → Chrome Extension 
 /install-plugin smarticeAI/smartice_plugins agent-browse
 ```
 
-### 2. Configure Auth Token
+### 2. Set Your Auth Token
 
-When you first enable the plugin, Claude Code will prompt you for your auth token. It is stored securely in your system keychain — no environment variables needed.
+Add to your shell profile (`.zshrc`, `.bashrc`, etc.):
 
-Token is provided by your admin. Self-hosted users: use the value from your server's `AGENT_BROWSE_AUTH_TOKEN` config.
+```bash
+export AGENT_BROWSE_TOKEN="your-token-here"
+```
+
+Token is provided by your admin.
 
 ### 3. Install the Chrome Extension
 
@@ -136,11 +140,15 @@ Claude Code → MCP (HTTPS) → 中继服务器 → WebSocket → Chrome 扩展 
 /install-plugin smarticeAI/smartice_plugins agent-browse
 ```
 
-### 2. 配置认证令牌
+### 2. 设置认证令牌
 
-首次启用插件时，Claude Code 会提示你输入认证令牌，令牌安全存储在系统钥匙串中，无需设置环境变量。
+在 shell 配置文件（`.zshrc`、`.bashrc` 等）中添加：
 
-令牌由管理员提供。自建服务器用户：使用服务器 `AGENT_BROWSE_AUTH_TOKEN` 配置中的值。
+```bash
+export AGENT_BROWSE_TOKEN="你的令牌"
+```
+
+令牌由管理员提供。
 
 ### 3. 安装 Chrome 扩展
 

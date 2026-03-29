@@ -31,7 +31,7 @@ The user's Chrome extension connects to the relay server. Claude Code sends MCP 
 
 Before using browser tools, the user must have:
 1. Chrome extension installed and configured (server URL + userId + token in extension options)
-2. Auth token configured in Claude Code (prompted on first plugin enable)
+2. `AGENT_BROWSE_TOKEN` environment variable set (their auth token)
 3. Extension showing "Connected" status
 
 Check connection status first:
