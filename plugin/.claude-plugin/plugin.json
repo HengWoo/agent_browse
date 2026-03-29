@@ -10,7 +10,7 @@
   "license": "MIT",
   "userConfig": {
     "agent_browse_token": {
-      "description": "Your agent-browse auth token (provided by admin)",
+      "description": "Auth token for the agent-browse relay server (required — get from your admin or your server's AGENT_BROWSE_AUTH_TOKEN config)",
       "sensitive": true
     }
   },
